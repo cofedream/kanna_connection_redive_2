@@ -33,7 +33,27 @@ from traceback import format_exc
 
 
 def estimate_carry_seconds(hp, raw_damage, start_time, battle_time):
-    # Only normal 90s attacks earn carryover. A short carryover cannot earn more.
+    """估算一次击破获得的返秒（持越し時間），无法确定时返回 None。
+
+    数据来源：clan_battle/timeline_report + clan_battle/battle_log_list。
+    - start_time(start_remain_time)：本刀开场剩余时间。整刀为 90，补偿刀为补偿时长
+      （<90；满补 90s 的补偿刀同样是 90）。
+    - battle_time：本刀实际用时。战斗内打死 BOSS 时 < start_time，打满/用完 = start_time。
+    - raw_damage(record.total_damage)：本刀计入 BOSS 的伤害，已按 BOSS 剩余血量封顶
+      （units 伤害之和才是含溢出的原始伤害）。
+    - hp：击杀前 BOSS 剩余血量。
+
+    现行规则（2021-07 后）：
+    - 整刀击杀：返秒 = 击杀时剩余时间 + 20s = 110 - battle_time。
+      此时 total_damage 已封顶到剩余血量，hp/raw == 1，下面公式自然退化为此结果。
+    - 合刀结算（battle_time == 90，本刀模拟内未击杀）：返秒 = 90*(1-hp/raw) + 20s，
+      即 110 - 90*hp/raw。
+    - 补偿刀击杀（start_time < 90）：不产生新返秒。
+    - 上限 90s；整数写法 110 - floor(x) 即 ceil(110 - x)。
+
+    已知盲区：满补（90s）补偿刀的 start_time 与整刀相同，API 无法区分
+    （battle_type 实测也不区分整刀/补偿刀），这里按整刀估价，接受误报。
+    """
     if (not isinstance(hp, int) or not isinstance(raw_damage, int)
             or not 0 < hp <= raw_damage or start_time != 90
             or not isinstance(battle_time, int) or not 0 <= battle_time <= 90):
@@ -63,6 +83,8 @@ class ClanBattle:
         self.damage_correction = DamageCorrectionTracker()
         self.entry_lock = asyncio.Lock()
         self.entries = EntryTracker('')
+        # 本轮击破播报的返秒估算数据：key -> (start_remain_time, battle_time, 本刀计入伤害)。
+        # 由 add_record 抓详细战报时填充，供 record_change 估返秒用。
         self.report_timings = {}
 
     async def init(self, client: BaseClient, user_id: int, bot_id: int):
@@ -181,6 +203,9 @@ class ClanBattle:
             pcrid, self.clan_battle_id, record.battle_log_id
         )
         if allow_damage_correction:
+            # 顺手缓存详细战报的时间信息，供 record_change 的击破播报估算返秒。
+            # key 与 damage_correction.history_key 一致：
+            # (pcrid, 周目, boss, battle_end_time == damage_history.create_time)。
             self.report_timings[(pcrid, record.lap_num, record.order_num, time)] = (
                 time_line.start_remain_time, time_line.battle_time, record.total_damage,
             )
@@ -299,6 +324,7 @@ class ClanBattle:
             if history.kill:
                 message = f"{history.name}对{history.lap_num}周目{history.order_num}王造成{damage}伤害并击破"
                 key = history_key(history)
+                # 补偿刀或数据缺失时 estimate_carry_seconds 返回 None，只播报伤害与击破。
                 timing = self.report_timings.get(key)
                 seconds = None
                 if timing is not None:
