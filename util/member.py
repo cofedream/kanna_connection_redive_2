@@ -61,3 +61,16 @@ async def get_member_name(
                 return name
 
     return fallback
+
+
+def format_monitor_name(game_name: str, qq_name: str, fallback: str = "未知") -> str:
+    """格式化监控人显示名：游戏昵称为主，QQ 昵称括注。
+
+    会战/竞技场认的是游戏内昵称，且它不依赖官方机器人的群成员接口权限；
+    QQ 昵称拿得到时作为补充信息括注在括号里。
+    """
+    game_name = (game_name or "").strip()
+    qq_name = (qq_name or "").strip()
+    if game_name and qq_name and qq_name != game_name:
+        return f"{game_name}（{qq_name}）"
+    return game_name or qq_name or fallback

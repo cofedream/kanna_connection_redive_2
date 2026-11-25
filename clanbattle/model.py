@@ -57,7 +57,8 @@ class ClanBattle:
         self.boss = [Boss(), Boss(), Boss(), Boss(), Boss()]
         self.clan_name = ""
         self.period = ""
-        self.monitor_name = ""  # 监控人显示名（官方机器人拿不到群名片时用）
+        self.monitor_name = ""  # 监控人 QQ 昵称（官方机器人拿不到群名片时可能为空）
+        self.account_name = ""  # 监控账号的游戏昵称（开监控登录时刷新）
         self.dao_update_time = 0  # 网页端更新标记
         self.damage_correction = DamageCorrectionTracker()
         self.entry_lock = asyncio.Lock()
@@ -101,6 +102,10 @@ class ClanBattle:
 
     async def get_coin(self) -> int:
         load_index: LoadIndexResponse = await self.client.load_index()
+        # 顺手刷新游戏昵称（玩家改名后绑定时写入的 account.name 会过期）
+        user_info = load_index.user_info
+        if user_info and user_info.user_name:
+            self.account_name = user_info.user_name
         return find_item(load_index.item_list, ItemID.clanbattle_coin.value)
 
     async def get_clanbattle_top(self) -> ClanBattleTopResponse:

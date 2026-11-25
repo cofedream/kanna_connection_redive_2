@@ -8,13 +8,13 @@ from hoshino.util import pic2b64
 from nonebot import MessageSegment
 
 from ..database.dal import pcr_sqla, Account
-from ..login import query, run_group
+from ..login import check_client, query, run_group
 from .base import best_route
 from .get_img import general_img
 from .model import ArenaPool, PrioritizedQueryItem, ArenaItem, arena_manager
 from ..setting import ClientSetting
 from ..util.decorator import check_account_qqid
-from ..util.member import get_member_name, remember_member_name
+from ..util.member import format_monitor_name, get_member_name, remember_member_name
 
 arena_pool = ArenaPool(ClientSetting.jjc_max.value, 30, 20)
 
@@ -68,9 +68,16 @@ async def jjc_monitor(bot: HoshinoBot, ev: CQEvent, account: Account, qq_id: int
 
     run_group[ev.group_id] = ev.self_id
     loop_num = arena.loop_num
-    # 官方机器人拿不到群成员资料：本人上号时用消息事件里的昵称，否则退回游戏昵称
-    sender_name = remember_member_name(ev) if qq_id == ev.user_id else ""
-    arena.monitor_name = sender_name or account.name or ""
+    # 监控人以游戏昵称为主（登录后刷新），QQ 昵称只作括注，官方机器人拿不到群名片
+    game_name = ""
+    try:
+        load_index = await check_client(client)
+        if load_index and load_index.user_info:
+            game_name = load_index.user_info.user_name or ""
+    except Exception:
+        pass
+    arena.account_name = game_name or account.name or arena.account_name
+    arena.monitor_name = remember_member_name(ev) if qq_id == ev.user_id else ""
     await bot.send(
         ev,
         f"开始监控中, 可以发送【{'#' if is_group else ''}取消竞技场监控】或者顶号退出\n#监控编号HN100{loop_num}",
@@ -98,11 +105,11 @@ async def jjc_state(bot: HoshinoBot, ev: CQEvent):
     else:
         msg += "\n公主竞技场已关闭"
     msg += f"\n当前监控编号HN100{arena.loop_num}"
-    # 官方机器人没有群成员信息接口权限，优先用开监控时记下的昵称
-    username = arena.monitor_name or await get_member_name(
+    # 游戏昵称不依赖官方机器人接口权限，QQ 昵称拿得到时才括注
+    qq_name = arena.monitor_name or await get_member_name(
         bot, ev.group_id, arena.user_id
     )
-    msg += f"\n当前监控人{username or '未知'}"
+    msg += f"\n当前监控人{format_monitor_name(arena.account_name, qq_name)}"
     await bot.send(ev, msg)
 
 

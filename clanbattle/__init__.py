@@ -14,7 +14,7 @@ from ..login import query
 from ..setting import ClientSetting
 from ..util.auto_boss import clan_boss_info
 from ..util.decorator import check_account_qqid, check_priv_adimin
-from ..util.member import get_member_name, remember_member_name
+from ..util.member import format_monitor_name, get_member_name, remember_member_name
 from .base import (
     format_time,
     get_cbreport,
@@ -119,9 +119,9 @@ async def clanbattle_monitor(
             return
 
     loop_num = clan_info.loop_num
-    # 官方机器人拿不到群成员资料：本人上号时用消息事件里的昵称，否则退回游戏昵称
-    sender_name = remember_member_name(ev) if qq_id == ev.user_id else ""
-    clan_info.monitor_name = sender_name or account.name or ""
+    # 监控人以游戏昵称为主（登录时已刷新），QQ 昵称只作括注，官方机器人拿不到群名片
+    clan_info.monitor_name = remember_member_name(ev) if qq_id == ev.user_id else ""
+    clan_info.account_name = clan_info.account_name or account.name or ""
     await bot.send(
         ev,
         f"开始监控中, 可以发送【取消出刀监控】或者顶号退出\n#监控编号HN000{loop_num}",
@@ -157,11 +157,11 @@ async def daostate(bot: HoshinoBot, ev: CQEvent):
     msg = f"当前排名：{clan_info.rank}\n监控状态："
     if clan_info.loop_check:
         msg += "开启"
-        # 官方机器人没有群成员信息接口权限，优先用开监控时记下的昵称
-        username = clan_info.monitor_name or await get_member_name(
+        # 游戏昵称不依赖官方机器人接口权限，QQ 昵称拿得到时才括注
+        qq_name = clan_info.monitor_name or await get_member_name(
             bot, group_id, clan_info.user_id
         )
-        msg += f"\n监控人为：{username or '未知'}"
+        msg += f"\n监控人为：{format_monitor_name(clan_info.account_name, qq_name)}"
         msg += "(高占用)" if now - clan_info.loop_check > 30 else ""
     else:
         msg += "关闭"
