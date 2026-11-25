@@ -32,14 +32,15 @@
 ```
 加机器人好友后，使用对应命令绑定账号：
 
-【绑定账号 账号 密码】
+【绑定账号 账号 密码】B站帐密方式，access_key 过期可自动续期
+【B绑定账号 uid access_key】B服非帐密方式，凭据过期后需重新提取并重新绑定
 【渠绑定账号 login_id token】
 【台绑定账号 short_udid udid_viewer_id】
 ```
 
 ### 相关工具
 
-- [pcr_login_helper](https://github.com/SonderXiaoming/pcr_login_helper) - 账号提取器
+- [pcr_login_helper](https://github.com/SonderXiaoming/pcr_login_helper) - 账号提取器（支持B服/渠道服/台服，可提取B服的 uid 和 access_key）
 - ⚠️ 台服未经测试，理论上应该也可以，欢迎 PR
 
 ---

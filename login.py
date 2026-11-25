@@ -19,21 +19,30 @@ from .basedata import Platform, FilePath
 from nonebot import NoticeSession, get_bot, on_command, on_notice, logger, on_startup
 from .database.dal import pcr_sqla
 from .util.tools import load_config, write_config
-from .errorclass import NeedRefreshError, UnknowError
+from .errorclass import AccessKeyExpiredError, NeedRefreshError, UnknowError
 
 sv_help = """
 （加好友私聊）
-【绑定账号+账号+密码】加号为空格 
+【绑定账号+账号+密码】加号为空格，access_key过期可自动续期
+【B绑定账号+uid+access_key】加号为空格，无需帐密，凭据过期后需重新提取并重新绑定
 【渠绑定账号+login_id+token】加号为空格
 【台绑定账号+short_udid+udid_viewer_id】加号为空格
 login_id和token群里有提取器
 short_udid、udid和viewer_id也有提取器
+B服的uid和access_key也有提取器
 """
 
 sv = Service("你只需要好好出刀", help_=sv_help, visible=True)
 
 run_group: Dict[int, int] = {}
 client_cache: Dict[Tuple[int, int], BaseClient] = {}
+
+
+def _rebind_hint(account: Account) -> str:
+    """凭据失效且没有帐密可自动续期时的重新绑定提示。"""
+    if account.platform == Platform.qu_id.value:
+        return "登录凭据已失效（token 过期或填写有误），请重新提取 login_id 和 token 后重新绑定"
+    return "登录凭据已失效（access_key 过期或填写有误），请重新提取 uid 和 access_key 后重新绑定"
 
 
 async def query(account: Account, is_force=False):
@@ -54,16 +63,21 @@ async def query(account: Account, is_force=False):
         await client.login()
     except NeedRefreshError:
         logger.warning(f"{account.viewer_id}的access_key过期，重新获取")
-        bili_account = await pcr_sqla.query_refresh(account.refresh)
-        if bili_account:
-            uid, access_key = await get_access_key(
-                bili_account.account, bili_account.password, account.user_id
-            )
-            account.account = str(uid)
-            account.password = access_key
-            await pcr_sqla.add_account(account.user_id, account.dict(exclude_none=True))
-            client = pcrclient(account.account, account.password, account.platform)
-            await client.login()
+        bili_account = (
+            await pcr_sqla.query_refresh(account.refresh)
+            if account.refresh
+            else None
+        )
+        if not bili_account:
+            raise AccessKeyExpiredError(_rebind_hint(account)) from None
+        uid, access_key = await get_access_key(
+            bili_account.account, bili_account.password, account.user_id
+        )
+        account.account = str(uid)
+        account.password = access_key
+        await pcr_sqla.add_account(account.user_id, account.dict(exclude_none=True))
+        client = pcrclient(account.account, account.password, account.platform)
+        await client.login()
     if await check_client(client):
         client_cache[player] = client
         return client
@@ -142,6 +156,48 @@ async def bind_support(session: NoticeSession):
             await session.send("绑定成功")
         else:
             await session.send("绑定失败，请检查你的账号密码并重试")
+    except Exception as e:
+        logger.error(traceback.format_exc())
+        await session.send(f"绑定失败{str(e)}")
+
+
+@on_command(
+    "B绑定账号",
+    aliases=("b绑定账号", "B服绑定账号", "b服绑定账号"),
+)
+async def bind_support_b(session: NoticeSession):
+    content = session.ctx.message.extract_plain_text().split()
+    qq_id = session.ctx.user_id
+    if len(content) != 3:
+        await session.send(sv_help)
+        return
+    uid, access_key = content[1], content[2]
+    if not uid.isdigit():
+        await session.send(
+            "uid 应为B站数字账号（例如 123456789）\n"
+            "如果你想用B站帐密绑定，请发送【绑定账号 账号 密码】"
+        )
+        return
+    try:
+        account = Account(
+            user_id=qq_id,
+            platform=Platform.b_id.value,
+            account=uid,
+            password=access_key,
+        )
+        client = await query(account, True)
+        if load_index := await check_client(client):
+            account.viewer_id = load_index.user_info.viewer_id
+            account.name = load_index.user_info.user_name
+            # 非帐密绑定不保存B站帐密，清掉可能残留的 refresh，避免凭据失效后误用旧帐密续期
+            await pcr_sqla.add_account(
+                qq_id, {**account.dict(exclude_none=True), "refresh": None}
+            )
+            await session.send("绑定成功")
+        else:
+            await session.send("绑定失败，请检查你的 uid 和 access_key 是否完整并重试")
+    except AccessKeyExpiredError as e:
+        await session.send(str(e))
     except Exception as e:
         logger.error(traceback.format_exc())
         await session.send(f"绑定失败{str(e)}")

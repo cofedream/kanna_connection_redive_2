@@ -42,6 +42,13 @@ class NeedReLoginError(Exception):
         super().__init__("需要重新登录")
 
 
+class AccessKeyExpiredError(Exception):
+    """access_key/token 失效，且没有可用于自动续期的帐密"""
+
+    def __init__(self, message: str):
+        super().__init__(message)
+
+
 class RiskControlError(Exception):
     def __init__(self):
         super().__init__("账号存在风险，请改密码后重新登录")
