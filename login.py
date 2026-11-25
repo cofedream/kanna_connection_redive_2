@@ -4,7 +4,7 @@ from typing import Dict, Tuple
 import httpx
 import traceback
 from hoshino import Service
-from hoshino.typing import HoshinoBot, CQEvent
+from hoshino.typing import HoshinoBot, CQEvent, CommandSession
 from .client import (
     check_client,
     decryptxml,
@@ -79,6 +79,18 @@ async def init_database():
 async def send_jjchelp(bot: HoshinoBot, ev: CQEvent):
     await bot.send(ev, sv_help)
     await bot.send_private_msg(user_id=ev.user_id, message=sv_help)
+
+
+@on_command("绑定账号帮助", only_to_me=False)
+async def send_jjchelp_private(session: CommandSession):
+    """私聊里的“绑定账号帮助”。
+
+    Hoshino 的 Service 触发器（hoshino.msghandler）只处理群消息，私聊需要
+    交给 nonebot 的命令处理器；群消息仍由上面的 sv 处理器负责，这里直接跳过。
+    """
+    if session.ctx.detail_type != "private":
+        return
+    await session.send(sv_help)
 
 
 @sv.on_fullmatch("缓存运行群")

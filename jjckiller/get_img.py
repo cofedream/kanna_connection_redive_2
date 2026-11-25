@@ -8,24 +8,43 @@ from ..basedata import FilePath, FontPath
 from math import ceil
 from hoshino.util import filt_message
 
+
+def _load_gadget(name: str) -> Optional[Image.Image]:
+    """加载 HoshinoBot 资源包中的赞/踩图标。
+
+    这些图标属于可选的 priconne gadget 资源（res.zip），缺失时返回 None，
+    由渲染逻辑回退为“赞/踩”文字，不应导致插件导入失败。
+    """
+    res = R.img(f"priconne/gadget/{name}.png")
+    # 先判断文件是否存在：R.ResImg.open() 找不到文件时会直接打 ERROR 日志并抛异常
+    if not res.exist:
+        return None
+    try:
+        return res.open().resize((16, 16), Image.LANCZOS)
+    except Exception:
+        return None
+
+
+thumb_up_i = _load_gadget("thumb-up-i")
+thumb_up_a = _load_gadget("thumb-up-a")
+thumb_down_i = _load_gadget("thumb-down-i")
+thumb_down_a = _load_gadget("thumb-down-a")
+if any(t is None for t in (thumb_up_i, thumb_up_a, thumb_down_i, thumb_down_a)):
+    logger.warning(
+        "res/img/priconne/gadget/thumb-*.png 缺失（未安装 priconne res.zip 资源包），"
+        "竞技场图片中的赞/踩图标将使用文字代替"
+    )
+
 try:
-    thumb_up_i = (
-        R.img("priconne/gadget/thumb-up-i.png").open().resize((16, 16), Image.LANCZOS)
-    )
-    thumb_up_a = (
-        R.img("priconne/gadget/thumb-up-a.png").open().resize((16, 16), Image.LANCZOS)
-    )
-    thumb_down_i = (
-        R.img("priconne/gadget/thumb-down-i.png").open().resize((16, 16), Image.LANCZOS)
-    )
-    thumb_down_a = (
-        R.img("priconne/gadget/thumb-down-a.png").open().resize((16, 16), Image.LANCZOS)
-    )
     # _im = Image.open(str(FilePath.resource.value / 'jjc' / 'bg_jjc.png'))
     _im_head = Image.open(str(FilePath.img.value / "jjc" / "head.png"))
     _im_body = Image.open(str(FilePath.img.value / "jjc" / "body.png"))
     _im_bottom = Image.open(str(FilePath.img.value / "jjc" / "bottom.png"))
     _im_player = Image.open(str(FilePath.img.value / "jjc" / "player.png"))
+except Exception as e:
+    logger.exception(e)
+
+try:
     font = ImageFont.truetype(str(FontPath.pcr_font.value), 14)
     set_font = ImageFont.truetype(str(FontPath.pcr_font.value), 40)
 except Exception as e:
@@ -89,21 +108,21 @@ async def render_atk_def_teams(
         x1 = 5 * icon_size + 10
         if e["team_type"] == "normal":
             x2 = x1 + 16
-            try:
+            if thumb_up_a is not None:
                 im.paste(
                     thumb_up_a,
                     (x1 + border_pix, y1 + 12, x2 + border_pix, y1 + 28),
                     thumb_up_a,
                 )
-            except:
+            else:
                 draw.text((x1, y1 + 10), "赞", (0, 0, 0, 255), font)
-            try:
+            if thumb_down_a is not None:
                 im.paste(
                     thumb_down_a,
                     (x1 + border_pix, y1 + 39, x2 + border_pix, y1 + 55),
                     thumb_down_a,
                 )
-            except:
+            else:
                 draw.text((x1, y1 + 35), "踩", (0, 0, 0, 255), font)
             draw.text(
                 (x1 + 25 + border_pix, y1 +
