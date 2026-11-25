@@ -65,14 +65,13 @@ class PoolBase:
 
     async def auto_sleep(self, run_time: int, log: bool = False, label: str = ""):
         if run_time > self.max_sleep:
+            # 常态轮次（本轮很快、补等到最小间隔）是稳态，不记录日志：
+            # loguru 默认 sink 是 DEBUG，写成 logger.debug 也照样每 15s 刷一条。
+            # 只有明显变慢（过慢）才值得告警。
             if log:
                 logger.warning(f"{label}运行时间{run_time}, 过慢，不等待")
         elif run_time < self.min_sleep:
-            if log:
-                logger.info(f"{label}运行时间{run_time}, 过快, 等待至最小间隔{self.min_sleep}s")
             await asyncio.sleep(self.min_sleep - run_time)
-        elif log:
-            logger.info(f"{label}运行时间{run_time}, 中等, 不等待")
 
     async def do_single(self, item: PrioritizedQueryItemBase):
         raise NotImplementedError

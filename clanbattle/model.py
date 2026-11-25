@@ -83,12 +83,16 @@ class ClanBattle:
         self.damage_correction = DamageCorrectionTracker()
         self.entry_lock = asyncio.Lock()
         self.entries = EntryTracker('')
+        # 下一轮是否要抓战斗日志入库：监控（重）启动时要回填，入库失败时要重试，
+        # 其余没有新刀的空转轮次直接跳过，省掉 battle_log_list 请求。
+        self.record_pending = True
         # 本轮击破播报的返秒估算数据：key -> (start_remain_time, battle_time, 本刀计入伤害)。
         # 由 add_record 抓详细战报时填充，供 record_change 估返秒用。
         self.report_timings = {}
 
     async def init(self, client: BaseClient, user_id: int, bot_id: int):
         self.loop_num += 1
+        self.record_pending = True  # 重开监控时先补一轮战报入库
         self.client = client
         self.bot_id = bot_id
         self.user_id = user_id
@@ -163,14 +167,19 @@ class ClanBattle:
     async def get_battle_log(self, page: int) -> ClanBattleLogListResponse:
         return await self.client.clan_battle_log(page, self.clan_battle_id)
 
-    async def add_record(self, loop_num: int):
+    async def add_record(self, loop_num: int) -> bool:
+        """抓取战斗日志并入库。
+
+        返回 True 表示本轮已处理完（含"没有新战报"），False 表示失败，
+        调用方通过 record_pending 在下一轮重试。
+        """
         log_list: List[BattleInfo] = []
         dao_list = []
-        with contextlib.suppress(Exception):
-            # 故意不重试，这循环极端情况下运行10分钟也正常，不如报错趁早退出，下次再来
+        try:
+            # 故意不做轮内重试，失败了留给下一轮（record_pending）
             log_temp = await self.get_battle_log(1)  # 获取最大页数
             if not log_temp.battle_list:
-                return  # 数据空
+                return True  # 数据空
 
             latest_time = await pcr_sqla.get_latest_time(self.group_id)
             existing_keys = await pcr_sqla.get_record_keys_at(self.group_id, latest_time)
@@ -198,8 +207,18 @@ class ClanBattle:
                         record, time, allow_damage_correction=key_counts[key] == 1
                     )
                     dao_list.append(record_dao)
-        if dao_list:
-            await pcr_sqla.add_record(dao_list)
+            if dao_list:
+                await pcr_sqla.add_record(dao_list)
+        except CancelledError:
+            raise  # 监控被取消，交给 do_single / ClanbattleHandle 收尾
+        except DetailHttpError as e:
+            # 网关 5xx/网络抖动属于预期内的失败：下一轮自动重试，不刷整条调用栈。
+            logger.warning(f'抓取出刀记录失败（网络异常，下轮重试）：{e}')
+            return False
+        except Exception:
+            logger.exception('抓取出刀记录失败，下轮重试')
+            return False
+        return True
 
     async def general_single_record(
         self, record: BattleInfo, time: int, allow_damage_correction: bool = True
@@ -323,8 +342,11 @@ class ClanBattle:
         histories = self.damage_correction.update(clan_battle_top)
         # 出刀详情入库（战报/催刀/KPI 都依赖这张表）。这一步同时抓取
         # time_line_report 填好 report_timings，下面击破播报才能算返秒。
-        self.report_timings.clear()
-        await self.add_record(self.loop_num)
+        # 没有新刀的空转轮次没必要每轮都翻战斗日志：只有出现新 history、
+        # 上一轮入库失败（record_pending）或监控刚启动需要回填时才抓。
+        if histories or self.record_pending:
+            self.report_timings.clear()
+            self.record_pending = not await self.add_record(self.loop_num)
         for history in histories:
             damage = self.damage_correction.history_damage(history)
             if history.kill:
