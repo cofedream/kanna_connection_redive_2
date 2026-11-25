@@ -20,7 +20,7 @@ from ..client.response import (
 )
 from ..database.dal import pcr_sqla
 from ..database.models import RecordDao
-from ..errorclass import CancelledError
+from ..errorclass import CancelledError, DetailHttpError
 from ..login import run_group
 from ..util.task_pool import PoolBase, PrioritizedQueryItemBase
 from ..util.tools import anywhere_send
@@ -149,7 +149,13 @@ class ClanBattle:
                     await pcr_sqla.save_battle_entries(self.group_id, self.entries.dump())
                     boss.fighter_num = len(self.entries.bosses.get(str(order), {}).get('entries', []))
                     return boss.fighter_num if added else 0
+        except DetailHttpError as e:
+            # 网关 5xx/网络抖动属于预期内的失败：本轮跳过，下一轮自动重试。
+            # 只记一条简短 WARNING，避免 loguru 打出整条 asyncio 调用栈。
+            logger.warning(f'读取或保存进刀计时失败（网络异常，本轮跳过）：{e}')
+            return 0
         except Exception:
+            # 非网络异常说明进刀计时逻辑或数据库可能真有 bug，保留 ERROR 和堆栈。
             logger.exception('读取或保存进刀计时失败')
             return 0
         return 0  # 0不播报，没改变不报，改变了是0也不报
