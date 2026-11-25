@@ -3,7 +3,7 @@ import time
 from typing import Dict
 
 import nonebot
-from hoshino import Service, priv
+from hoshino import Service, message_preprocessor, priv
 from hoshino.typing import CQEvent, HoshinoBot
 from loguru import logger
 
@@ -14,6 +14,7 @@ from ..login import query
 from ..setting import ClientSetting
 from ..util.auto_boss import clan_boss_info
 from ..util.decorator import check_account_qqid, check_priv_adimin
+from ..util.member import get_member_name, remember_member_name
 from .base import (
     format_time,
     get_cbreport,
@@ -73,6 +74,19 @@ sv = Service(
 )
 
 
+@message_preprocessor
+async def cache_member_display_name(bot: HoshinoBot, ev: CQEvent, _):
+    """官方机器人没有群成员信息接口权限，收到群消息时先把发送者昵称记下来。
+
+    之后【状态】【预约表】【查树】等展示 QQ 昵称的地方才能不显示空名字。
+    """
+    try:
+        if ev.get("message_type") == "group":
+            remember_member_name(ev)
+    except Exception:
+        pass
+
+
 @sv.on_fullmatch("自动报刀帮助")
 async def clanbattle_help(bot: HoshinoBot, ev: CQEvent):
     await bot.send(ev, help_text)
@@ -105,6 +119,9 @@ async def clanbattle_monitor(
             return
 
     loop_num = clan_info.loop_num
+    # 官方机器人拿不到群成员资料：本人上号时用消息事件里的昵称，否则退回游戏昵称
+    sender_name = remember_member_name(ev) if qq_id == ev.user_id else ""
+    clan_info.monitor_name = sender_name or account.name or ""
     await bot.send(
         ev,
         f"开始监控中, 可以发送【取消出刀监控】或者顶号退出\n#监控编号HN000{loop_num}",
@@ -140,14 +157,11 @@ async def daostate(bot: HoshinoBot, ev: CQEvent):
     msg = f"当前排名：{clan_info.rank}\n监控状态："
     if clan_info.loop_check:
         msg += "开启"
-        try:
-            member_info = await bot.get_group_member_info(
-                group_id=group_id, user_id=clan_info.user_id
-            )
-            username = member_info["card"] or member_info["nickname"]
-        except Exception:
-            username = "桥本环奈"
-        msg += f"\n监控人为：{username}"
+        # 官方机器人没有群成员信息接口权限，优先用开监控时记下的昵称
+        username = clan_info.monitor_name or await get_member_name(
+            bot, group_id, clan_info.user_id
+        )
+        msg += f"\n监控人为：{username or '未知'}"
         msg += "(高占用)" if now - clan_info.loop_check > 30 else ""
     else:
         msg += "关闭"
@@ -160,10 +174,9 @@ async def daostate(bot: HoshinoBot, ev: CQEvent):
             msg += f"========={i}王=========\n"
             msg += f"当前有{len(apply_info)}人申请挑战boss\n"
             for i, info in enumerate(apply_info):
-                member_info = await bot.get_group_member_info(
-                    group_id=group_id, user_id=info.user_id
+                name = await get_member_name(
+                    bot, group_id, info.user_id, fallback="未知"
                 )
-                name = member_info["card"] or member_info["nickname"]
                 msg += f"->{i+1}：{name} {info.text} 已过去{format_time(now - info.time)}\n"
     if msg:
         await bot.send(ev, msg.strip())
@@ -205,13 +218,10 @@ async def formsubscribe(bot: HoshinoBot, ev: CQEvent):
         ):
             for player in info:
                 lap = f"第{player.lap}周目" if player.lap else "当前周目"
-                info = await bot.get_group_member_info(
-                    group_id=ev.group_id, user_id=player.user_id
+                name = await get_member_name(
+                    bot, ev.group_id, player.user_id, fallback="未知"
                 )
-                name = "card" if info["card"] else "nickname"
-                msg = (
-                    f"{info[name]}:{player.text}" if player.text else info[name]
-                ) + f" {lap}"
+                msg = (f"{name}:{player.text}" if player.text else name) + f" {lap}"
                 subscribers.append(msg)
         if subscribers:
             FormSubscribe += f"\n========={boss}王=========\n" + "\n".join(subscribers)
@@ -326,10 +336,10 @@ async def checktree(bot: HoshinoBot, ev: CQEvent):
         if info := await pcr_sqla.get_notice(NoticeType.tree.value, ev.group_id, i):
             reply += f"{i}王树上目前有{len(info)}人\n"
             for i, player in enumerate(info):
-                player_info = await bot.get_group_member_info(
-                    group_id=ev.group_id, user_id=player.user_id
+                name = await get_member_name(
+                    bot, ev.group_id, player.user_id, fallback="未知"
                 )
-                reply += f'->{i+1}：{player_info["card" if player_info["card"] else "nickname"]} {player.text} 已过去{format_time(time.time() - player.time)}\n'
+                reply += f'->{i+1}：{name} {player.text} 已过去{format_time(time.time() - player.time)}\n'
     await bot.send(ev, reply or "目前树上空空如也")
 
 
@@ -358,10 +368,7 @@ async def apply(bot: HoshinoBot, ev: CQEvent):
     msg += f"========={boss}王=========\n"
     msg += f"当前有{len(apply_info)}人申请挑战boss\n"
     for i, info in enumerate(apply_info):
-        member_info = await bot.get_group_member_info(
-            group_id=ev.group_id, user_id=info.user_id
-        )
-        name = member_info["card"] or member_info["nickname"]
+        name = await get_member_name(bot, ev.group_id, info.user_id, fallback="未知")
         msg += f"->{i+1}：{name} {info.text} 已过去{format_time(now - info.time)}\n"
     await bot.send(ev, msg.strip())
 

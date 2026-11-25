@@ -57,6 +57,7 @@ class ClanBattle:
         self.boss = [Boss(), Boss(), Boss(), Boss(), Boss()]
         self.clan_name = ""
         self.period = ""
+        self.monitor_name = ""  # 监控人显示名（官方机器人拿不到群名片时用）
         self.dao_update_time = 0  # 网页端更新标记
         self.damage_correction = DamageCorrectionTracker()
         self.entry_lock = asyncio.Lock()

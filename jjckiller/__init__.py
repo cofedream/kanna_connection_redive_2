@@ -14,6 +14,7 @@ from .get_img import general_img
 from .model import ArenaPool, PrioritizedQueryItem, ArenaItem, arena_manager
 from ..setting import ClientSetting
 from ..util.decorator import check_account_qqid
+from ..util.member import get_member_name, remember_member_name
 
 arena_pool = ArenaPool(ClientSetting.jjc_max.value, 30, 20)
 
@@ -67,6 +68,9 @@ async def jjc_monitor(bot: HoshinoBot, ev: CQEvent, account: Account, qq_id: int
 
     run_group[ev.group_id] = ev.self_id
     loop_num = arena.loop_num
+    # 官方机器人拿不到群成员资料：本人上号时用消息事件里的昵称，否则退回游戏昵称
+    sender_name = remember_member_name(ev) if qq_id == ev.user_id else ""
+    arena.monitor_name = sender_name or account.name or ""
     await bot.send(
         ev,
         f"开始监控中, 可以发送【{'#' if is_group else ''}取消竞技场监控】或者顶号退出\n#监控编号HN100{loop_num}",
@@ -94,14 +98,11 @@ async def jjc_state(bot: HoshinoBot, ev: CQEvent):
     else:
         msg += "\n公主竞技场已关闭"
     msg += f"\n当前监控编号HN100{arena.loop_num}"
-    try:
-        member_info = await bot.get_group_member_info(
-            group_id=ev.group_id, user_id=arena.user_id
-        )
-        username = member_info["card"] or member_info["nickname"]
-    except Exception:
-        username = "桥本环奈"
-    msg += f"\n当前监控人{username}"
+    # 官方机器人没有群成员信息接口权限，优先用开监控时记下的昵称
+    username = arena.monitor_name or await get_member_name(
+        bot, ev.group_id, arena.user_id
+    )
+    msg += f"\n当前监控人{username or '未知'}"
     await bot.send(ev, msg)
 
 

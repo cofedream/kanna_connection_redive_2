@@ -44,6 +44,7 @@ class Arena:
         self.latest_cache_time = 0
         self.user_id = user_id
         self.account_name = ""
+        self.monitor_name = ""  # 监控人显示名（官方机器人拿不到群名片时用）
         self.viewer_id = 0
 
     async def init(
