@@ -86,7 +86,9 @@ async def try_login(
         data["seccode"] = f"{validate}|jordan"
     data["pwd"] = rsacreate(rsa["hash"] + password, public_key)
     res = await sendpost(f"{bililogin}api/client/login", setsign(data))
-    if res.get("message", "") == "用户名或密码错误":
+    # 500002 / PWD_INVALID 是帐密校验失败；过码票据不合法时服务端返回的是
+    # 200001 / "geetest or captcha verify fail"（见下面的 PassCaptchError）。
+    if res.get("message", "") == "用户名或密码错误" or res.get("code") == 500002:
         raise PasswordError("用户名或密码错误")
     if res["code"] == 200000:
         raise NeedCaptchError
@@ -97,7 +99,7 @@ async def try_login(
     if "access_key" in res:
         return res["uid"], res["access_key"]
     logger.error(str(res))
-    raise UnknowError("未知错误")
+    raise UnknowError(f"{res.get('code')} {res.get('message', '')}".strip())
 
 
 async def make_captch(gt: str, challenge: str, user_id: str, qq_id: int) -> dict:
