@@ -31,6 +31,7 @@ from .base import (
     clanbattle_report,
 )
 
+from .hedao import HedaoError, calculate_hedao, format_hedao_reply, parse_amount
 from .kpi import kpi_report
 from .model import ClanBattle, ClanbattleItem, ClanBattlePool, PrioritizedQueryItem
 
@@ -43,6 +44,7 @@ help_text = """
 【今日战报 + 游戏名称】 栞栞今日个人出刀情况
 【昨日战报 + 游戏名称】 栞栞昨日个人出刀情况
 【出刀详情 + 出刀编号】 栞栞你这刀怎么出的（出刀编号可以通过查看个人战报获得）
+【合刀 + 刀1伤害 + 刀2伤害 + 剩余血量】 计算两刀合刀的伤害分配与补偿刀时长，如【合刀 50 60 70】
 【今日出刀】今日出刀情况
 【昨日出刀】昨日出刀情况
 【启用肃正协议】数据出现异常使用即可清空所有数据（危险！！！）
@@ -94,6 +96,29 @@ async def cache_member_display_name(bot: HoshinoBot, ev: CQEvent, _):
 @sv.on_fullmatch("自动报刀帮助")
 async def clanbattle_help(bot: HoshinoBot, ev: CQEvent):
     await bot.send(ev, help_text)
+
+
+HEDAO_HELP = (
+    "请输入：合刀 刀1伤害 刀2伤害 剩余血量\n"
+    "如：合刀 50 60 70\n"
+    "伤害与血量请使用同一单位，支持 50、50w、50万 等写法\n"
+    "补偿刀时长按 90 秒均匀出伤估算，仅供参考"
+)
+
+
+@sv.on_prefix("合刀")
+async def hedao_calc(bot: HoshinoBot, ev: CQEvent):
+    args = ev.message.extract_plain_text().strip().split()
+    if len(args) != 3:
+        await bot.send(ev, HEDAO_HELP)
+        return
+    try:
+        damage1, damage2, rest_hp = (parse_amount(arg) for arg in args)
+        result = calculate_hedao(damage1, damage2, rest_hp)
+    except HedaoError as e:
+        await bot.send(ev, str(e))
+        return
+    await bot.send(ev, format_hedao_reply(result))
 
 
 @sv.on_prefix("出刀监控")
