@@ -18,6 +18,14 @@ from .database.models import Account, RefreshAccount
 from .basedata import Platform, FilePath
 from nonebot import NoticeSession, get_bot, on_command, on_notice, logger, on_startup
 from .database.dal import pcr_sqla
+from .util.account_commands import (
+    UNBIND_USAGE,
+    format_account_list,
+    format_not_bound,
+    format_platform_unknown,
+    format_unbind_done,
+    parse_platform,
+)
 from .util.tools import load_config, write_config
 from .errorclass import AccessKeyExpiredError, NeedRefreshError, UnknowError
 
@@ -27,6 +35,8 @@ sv_help = """
 【B绑定账号+uid+access_key】加号为空格，无需帐密，凭据过期后需重新提取并重新绑定
 【渠绑定账号+login_id+token】加号为空格
 【台绑定账号+short_udid+udid_viewer_id】加号为空格
+【查看绑定账号】查看自己当前绑定的账号
+【解绑账号+服务器】立即删除绑定，服务器填 B服/渠道服/台服
 login_id和token群里有提取器
 short_udid、udid和viewer_id也有提取器
 B服的uid和access_key也有提取器
@@ -260,6 +270,54 @@ async def bind_support_tw(session: NoticeSession):
     except Exception as e:
         logger.error(traceback.format_exc())
         await session.send(f"绑定失败{str(e)}")
+
+
+async def _account_list_text(user_id: int) -> str:
+    return format_account_list(await pcr_sqla.query_account(user_id))
+
+
+def _forget_client_cache(account: Account):
+    """解绑后清掉登录缓存，避免后续指令继续复用旧凭据。"""
+    client_cache.pop((account.viewer_id, account.platform), None)
+
+
+async def _unbind_account_text(user_id: int, args: str) -> str:
+    tokens = args.split()
+    if not tokens:
+        return UNBIND_USAGE
+    platform = parse_platform(tokens[0])
+    if platform is None:
+        return format_platform_unknown(tokens[0])
+    accounts = await pcr_sqla.query_account(user_id)
+    account = next((item for item in accounts if item.platform == platform), None)
+    if account is None:
+        return format_not_bound(platform)
+    await pcr_sqla.delete_account(user_id, platform)
+    _forget_client_cache(account)
+    return format_unbind_done(account)
+
+
+@sv.on_fullmatch("查看绑定账号", "查询绑定账号")
+async def view_bound_account(bot: HoshinoBot, ev: CQEvent):
+    await bot.send(ev, await _account_list_text(ev.user_id))
+
+
+@sv.on_prefix("解绑账号", "删除绑定账号")
+async def unbind_bound_account(bot: HoshinoBot, ev: CQEvent):
+    await bot.send(
+        ev, await _unbind_account_text(ev.user_id, ev.message.extract_plain_text())
+    )
+
+
+@on_command("查看绑定账号", aliases=("查询绑定账号",))
+async def view_bound_account_private(session: CommandSession):
+    await session.send(await _account_list_text(session.ctx.user_id))
+
+
+@on_command("解绑账号", aliases=("删除绑定账号",))
+async def unbind_bound_account_private(session: CommandSession):
+    args = session.current_arg_text or ""
+    await session.send(await _unbind_account_text(session.ctx.user_id, args))
 
 
 @on_notice("offline_file")
