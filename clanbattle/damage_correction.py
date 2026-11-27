@@ -53,17 +53,23 @@ class DamageCorrectionTracker:
             self.previous_valid and top.damage_history is not None
             and (self.previous_head is None or identities.count(self.previous_head) == 1)
         )
-        if continuous and self.previous_head is not None:
-            candidates = histories[:identities.index(self.previous_head)]
-        else:
-            candidates = histories
-        new = [h for h in candidates if history_identity(h) not in self.events]
+        # Any unseen entry is new, including the ones listed *below* the previous
+        # head. Two attacks can share one create_time, and if the second becomes
+        # visible one poll later the server still lists it below the head; a
+        # head-window scan would lose it forever (no announcement, no HP replay).
+        # `events` makes this idempotent, so the head is only needed for HP.
+        new = [h for h in histories if history_identity(h) not in self.events]
+        new_ids = {history_identity(h) for h in new}
         # A duplicate event or an unseen entry behind the overlap means that the
-        # response cannot be replayed unambiguously.
+        # response cannot be replayed unambiguously. Entries behind the head that
+        # are in `new` are replayed by this batch, so they still allow HP replay.
         continuous = continuous and len(set(identities)) == len(identities)
         if self.previous_head is not None and self.previous_head in identities:
             behind = histories[identities.index(self.previous_head) + 1:]
-            continuous = continuous and all(history_identity(h) in self.events for h in behind)
+            continuous = continuous and all(
+                history_identity(h) in self.events or history_identity(h) in new_ids
+                for h in behind
+            )
 
         hp = dict(self.previous_bosses) if continuous else {}
         caps = {}
@@ -123,9 +129,12 @@ class DamageCorrectionTracker:
 
         self._snapshot(top)
         # Keep at most a day's history; leave room for delayed detailed reports.
+        # Entries still visible in damage_history are never pruned: after a long
+        # idle the same entries would otherwise be re-announced as "new".
         newest = max((h.create_time for h in histories), default=0)
+        visible = set(identities)
         for identity in list(self.events):
-            if identity[1][3] < newest - 86400:
+            if identity not in visible and identity[1][3] < newest - 86400:
                 del self.events[identity]
         return new
 
