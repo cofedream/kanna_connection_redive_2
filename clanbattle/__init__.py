@@ -16,6 +16,7 @@ from ..setting import ClientSetting
 from ..util import monitor_registry
 from ..util.auto_boss import clan_boss_info
 from ..util.decorator import check_account_qqid, check_priv_adimin
+from ..util.account_commands import resolve_monitor_account
 from ..util.member import format_monitor_name, get_member_name, remember_member_name
 from ..util.tools import anywhere_send
 from .base import (
@@ -35,7 +36,7 @@ from .model import ClanBattle, ClanbattleItem, ClanBattlePool, PrioritizedQueryI
 
 help_text = """
 * “+” 表示空格
-【出刀监控】机器人登录账号，监视出刀情况并记录（使用【查看绑定账号】里的默认账号）
+【出刀监控 + （序号）】机器人登录账号监视出刀；不填序号用默认账号，如【出刀监控 2】
 【催刀】栞栞谁没出满三刀
 【当前战报】本期会战出刀情况
 【我的战报 + 游戏名称】 栞栞个人出刀情况
@@ -102,6 +103,13 @@ async def clanbattle_monitor(
 ):
 
     group_id = ev.group_id
+    selector = ev.message.extract_plain_text().strip()
+    accounts = await pcr_sqla.query_account(qq_id)
+    # 不填序号用默认账号；填了序号/服务器名只影响这次监控，不改默认账号
+    account, error = resolve_monitor_account(selector, accounts, account)
+    if error:
+        await bot.send(ev, error)
+        return
 
     await bot.send(ev, f"正在登录账号，请耐心等待，当前监控玩家为{account.name}")
 
@@ -128,8 +136,8 @@ async def clanbattle_monitor(
     message = (
         f"开始监控中, 可以发送【取消出刀监控】或者顶号退出\n#监控编号HN000{loop_num}"
     )
-    if len(await pcr_sqla.query_account(qq_id)) > 1:
-        message += "\n当前使用默认账号，如需换号请先发送【切换默认账号 序号】"
+    if len(accounts) > 1 and not selector:
+        message += "\n当前使用默认账号，可发送【出刀监控 序号】指定其他账号，例如【出刀监控 2】"
     await bot.send(ev, message)
     await clanbattle_pool.add_task(
         PrioritizedQueryItem(data=ClanbattleItem(clan_info, loop_num))

@@ -247,6 +247,61 @@ class SelectorTests(unittest.TestCase):
         self.assertIn("2. B服：B2", error)
 
 
+class MonitorSelectorTests(unittest.TestCase):
+    def setUp(self):
+        self.b1 = account(1, platform=0, name="B1", default=1)
+        self.b2 = account(2, platform=0, name="B2")
+        self.qu = account(3, platform=1, name="QU")
+        self.accounts = [self.b1, self.b2, self.qu]
+
+    def test_empty_uses_default_account(self):
+        target, error = account_commands.resolve_monitor_account(
+            "", self.accounts, self.b1
+        )
+        self.assertIsNone(error)
+        self.assertIs(target, self.b1)
+
+    def test_default_keywords_use_default_account(self):
+        for token in ("默认", "[默认]", "当前"):
+            with self.subTest(token=token):
+                target, error = account_commands.resolve_monitor_account(
+                    token, self.accounts, self.b2
+                )
+                self.assertIsNone(error)
+                self.assertIs(target, self.b2)
+
+    def test_index_selects_account(self):
+        target, error = account_commands.resolve_monitor_account(
+            "2", self.accounts, self.b1
+        )
+        self.assertIsNone(error)
+        self.assertIs(target, self.b2)
+
+    def test_platform_name_selects_unique_account(self):
+        target, error = account_commands.resolve_monitor_account(
+            "渠道服", self.accounts, self.b1
+        )
+        self.assertIsNone(error)
+        self.assertIs(target, self.qu)
+
+    def test_invalid_selector_returns_list(self):
+        target, error = account_commands.resolve_monitor_account(
+            "9", self.accounts, self.b1
+        )
+        self.assertIsNone(target)
+        self.assertIn("超出范围", error)
+        target, error = account_commands.resolve_monitor_account(
+            "日服", self.accounts, self.b1
+        )
+        self.assertIsNone(target)
+        self.assertIn("无法识别账号", error)
+
+    def test_no_accounts_returns_hint(self):
+        target, error = account_commands.resolve_monitor_account("", [])
+        self.assertIsNone(target)
+        self.assertIn("还没有绑定账号", error)
+
+
 class UnbindTargetTests(unittest.TestCase):
     def setUp(self):
         self.b1 = account(1, platform=0, name="B1")

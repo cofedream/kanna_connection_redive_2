@@ -226,6 +226,26 @@ def resolve_account_selector(text: str, accounts: Iterable) -> Tuple[Optional[ob
     )
 
 
+MONITOR_DEFAULT_TOKENS = ("", "默认", "[默认]", "当前")
+
+
+def resolve_monitor_account(
+    text: str, accounts: Iterable, default_account=None
+) -> Tuple[Optional[object], Optional[str]]:
+    """监控类指令的选号：不填用默认账号，填序号或唯一服务器名选对应账号。
+
+    只影响这次监控，不改变默认账号。
+    """
+    accounts = sort_accounts(accounts)
+    token = (text or "").strip()
+    if token in MONITOR_DEFAULT_TOKENS:
+        account = default_account or pick_default_account(accounts)
+        if account is None:
+            return None, "你还没有绑定账号。发送【绑定账号帮助】查看绑定方式。"
+        return account, None
+    return resolve_account_selector(token, accounts)
+
+
 def resolve_unbind_target(tokens: Sequence[str], accounts: Iterable) -> Tuple[Optional[object], Optional[str]]:
     """把「解绑账号」的参数解析成账号。
 
