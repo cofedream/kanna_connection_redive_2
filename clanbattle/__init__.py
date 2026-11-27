@@ -1,9 +1,10 @@
+import asyncio
 import re
 import time
 from typing import Dict
 
 import nonebot
-from hoshino import Service, message_preprocessor, priv
+from hoshino import Service, message_preprocessor, priv, get_self_ids
 from hoshino.typing import CQEvent, HoshinoBot
 from loguru import logger
 
@@ -12,9 +13,11 @@ from ..database.dal import pcr_sqla, Account, RecordDao
 from ..database.models import ClanBattleKPI, NoticeCache, SLDao
 from ..login import query
 from ..setting import ClientSetting
+from ..util import monitor_registry
 from ..util.auto_boss import clan_boss_info
 from ..util.decorator import check_account_qqid, check_priv_adimin
 from ..util.member import format_monitor_name, get_member_name, remember_member_name
+from ..util.tools import anywhere_send
 from .base import (
     format_time,
     get_cbreport,
@@ -140,7 +143,13 @@ async def delete_monitor(bot: HoshinoBot, ev: CQEvent):
         return
     clan_info = clanbattle_info[group_id]
     if qq_id == clan_info.user_id or priv.check_priv(ev, priv.ADMIN):
+        old_loop_num = clan_info.loop_num
         clan_info.loop_num += 1
+        # 先删登记，避免任务已经静默死掉时，下次重启误补播「监控已退出」；
+        # 任务还活着的话下一轮会照常播报「监控已关闭」。
+        monitor_registry.unregister(
+            monitor_registry.KIND_CLAN, group_id, old_loop_num
+        )
     else:
         await bot.send(ev, "你不是监控人或者管理")
 
@@ -533,6 +542,71 @@ async def del_kpi(bot: HoshinoBot, ev: CQEvent):
 @nonebot.on_startup
 async def start_loop_handle():
     clanbattle_pool.init()
+
+
+# 重启补播：最多等 5 分钟（覆盖 go-cqhttp 连得慢 / 发送暂时失败的情况），每 10s 重试。
+# 用启动时拉起的一次性后台任务而不是 20s 一次的 scheduled_job：Hoshino 的
+# scheduled_job 包装层每轮会打两条 INFO 日志，高频轮询会刷屏；补播也只在启动后需要。
+_RESTART_NOTICE_TIMEOUT = 300
+_RESTART_NOTICE_INTERVAL = 10
+_restart_notice_tasks: set = set()
+
+
+async def _announce_restart_monitor_exit():
+    deadline = time.time() + _RESTART_NOTICE_TIMEOUT
+    warned: set = set()
+    try:
+        while time.time() < deadline:
+            entries = monitor_registry.pending_exits()
+            if not entries:
+                return
+            connected = set(get_self_ids())
+            if connected:
+                for entry in entries:
+                    if entry.get("kind") != monitor_registry.KIND_CLAN:
+                        continue  # 竞技场监控暂未接入这套补播
+                    if not monitor_registry.is_pending(entry):
+                        continue  # 补播前已经被重新注册，别播旧监控的退出
+                    group_id = int(entry["group_id"])
+                    loop_num = int(entry["loop_num"])
+                    silent = int(time.time()) - int(entry.get("heartbeat") or 0)
+                    message = f"#编号HN000{loop_num}出刀监控已退出：机器人重启导致监控中断"
+                    if silent >= 60:
+                        message += f"（已中断约{format_time(silent)}）"
+                    message += "，请重新发送【出刀监控】开启。"
+                    if account_name := entry.get("account_name"):
+                        message += f"\n监控账号：{account_name}"
+                    bot_id = int(entry.get("bot_id") or 0)
+                    sent = await anywhere_send(
+                        message, group_id, bot_id if str(bot_id) in connected else None
+                    )
+                    if sent:
+                        monitor_registry.resolve_pending(entry)
+                        continue
+                    key = (group_id, loop_num)
+                    if key not in warned:
+                        warned.add(key)
+                        logger.warning(
+                            f"重启后补发监控退出播报失败，稍后重试：群{group_id} HN000{loop_num}"
+                        )
+            await asyncio.sleep(_RESTART_NOTICE_INTERVAL)
+    except Exception:
+        # 后台任务没人 await，异常必须自己记掉，否则只会得到一条
+        # “Task exception was never retrieved”。
+        logger.exception("重启后补发监控退出播报异常")
+
+
+@nonebot.on_startup
+async def announce_restart_monitor_exit():
+    """进程重启后补发「出刀监控已退出」。
+
+    「监控退出」原本只在轮询抛异常时播报，进程被重启/杀掉时那条路径不会执行，
+    新进程里也没有任何监控状态。这里读落盘的残留登记补发，发送成功后才删登记；
+    CQ 还没连上或发送失败时留到下一轮重试。
+    """
+    task = asyncio.create_task(_announce_restart_monitor_exit())
+    _restart_notice_tasks.add(task)
+    task.add_done_callback(_restart_notice_tasks.discard)
 
 
 @sv.scheduled_job("cron", hour="1")

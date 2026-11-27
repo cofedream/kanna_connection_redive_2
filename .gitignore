@@ -2,6 +2,8 @@
 .vscode
 *.pyc
 rungroup.json
+monitors.json
+monitors.json.tmp
 clanbattlework.json
 data.db
 token.json

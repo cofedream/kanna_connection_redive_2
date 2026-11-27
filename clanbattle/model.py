@@ -22,6 +22,7 @@ from ..database.dal import pcr_sqla
 from ..database.models import RecordDao
 from ..errorclass import CancelledError, DetailHttpError
 from ..login import run_group
+from ..util import monitor_registry
 from ..util.task_pool import PoolBase, PrioritizedQueryItemBase
 from ..util.tools import anywhere_send
 from ..util.auto_boss import clan_boss_info
@@ -125,6 +126,15 @@ class ClanBattle:
         self.damage_correction.reset(clan_battle_top)
         self.members: Dict[int, str] = await self.all_member()
         self.dao_update_time = int(time.time())
+        # 落盘登记：进程重启后靠它补发「监控已退出」，否则监控静默消失。
+        monitor_registry.register(
+            monitor_registry.KIND_CLAN,
+            self.group_id,
+            bot_id=bot_id,
+            user_id=user_id,
+            loop_num=self.loop_num,
+            account_name=self.account_name,
+        )
 
     async def get_coin(self) -> int:
         load_index: LoadIndexResponse = await self.client.load_index()
@@ -454,6 +464,10 @@ class ClanBattlePool(PoolBase):
                 raise CancelledError
 
             clan_info.loop_check = time.time()
+            # 刷新存活时间，重启后可以据此估算监控是在哪一刻断的。
+            monitor_registry.heartbeat(
+                monitor_registry.KIND_CLAN, clan_info.group_id, loop_num
+            )
 
             # 初始化
             clan_battle_top = await clan_info.get_clanbattle_top()
@@ -513,8 +527,16 @@ class ClanbattleHandle:
         if self.clan_info.group_id in run_group:
             del run_group[self.clan_info.group_id]
 
+        # 停机时任务被 cancel：别把 CancelledError 当成可恢复错误吞掉（否则监控
+        # 静默消失甚至卡住停机），登记留在盘上，由重启后的补播统一播报退出。
+        if isinstance(exc_value, asyncio.CancelledError):
+            return False
+
         if self.loop_num != self.clan_info.loop_num:
             self.clan_info.dao_update_time = int(time.time())
+            monitor_registry.unregister(
+                monitor_registry.KIND_CLAN, self.clan_info.group_id, self.loop_num
+            )
             await anywhere_send(
                 f"#编号HN000{self.loop_num}监控已关闭",
                 self.clan_info.group_id,
@@ -524,6 +546,9 @@ class ClanbattleHandle:
 
         if not await check_client(self.clan_info.client):
             self.clan_info.dao_update_time = int(time.time())
+            monitor_registry.unregister(
+                monitor_registry.KIND_CLAN, self.clan_info.group_id, self.loop_num
+            )
             await anywhere_send(
                 "当前账号被顶号，出刀监控已退出",
                 self.clan_info.group_id,
@@ -534,6 +559,9 @@ class ClanbattleHandle:
         if self.clan_info.error_count > 3:
             self.clan_info.error_count = 0
             self.clan_info.dao_update_time = int(time.time())
+            monitor_registry.unregister(
+                monitor_registry.KIND_CLAN, self.clan_info.group_id, self.loop_num
+            )
             await anywhere_send(
                 f"超过最大重试次数，出刀监控已退出,{exc_value}: {traceback}",
                 self.clan_info.group_id,

@@ -59,9 +59,15 @@ def write_config(path: str, config: dict):
         json.dump(config, f, ensure_ascii=False)
 
 
-async def anywhere_send(msg: str, group_id: int, self_id: Optional[int] = None):
+async def anywhere_send(
+    msg: str, group_id: int, self_id: Optional[int] = None
+) -> bool:
+    """尽力把消息发到群里，返回是否发送成功。
+
+    调用方大多不关心返回值；重启补播这类需要「确认送达后再删登记」的场景会用到。
+    """
     if not msg or not group_id:
-        return
+        return False
     bot = get_bot()
     for _ in range(2):  # 试两遍
         with contextlib.suppress(Exception):
@@ -71,7 +77,8 @@ async def anywhere_send(msg: str, group_id: int, self_id: Optional[int] = None):
                 )
             else:
                 await group_send(group_id, msg)
-            return
+            return True
+    return False
 
 
 def name2id(name: str) -> Tuple[List[int], str]:

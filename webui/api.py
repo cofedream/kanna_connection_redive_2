@@ -18,6 +18,7 @@ from hoshino.modules.priconne.chara import fromid
 from hoshino.modules.priconne._pcr_data import CHARA_NAME
 
 from ..util.tools import daoflag2str, anywhere_send
+from ..util import monitor_registry
 
 from ..clanbattle import (
     clanbattle_info,
@@ -1950,8 +1951,11 @@ async def stop_clan_monitor(
     current = clanbattle_info.get(group_id)
     if not current or not current.loop_check:
         raise HTTPException(status.HTTP_409_CONFLICT, "当前没有运行中的监控")
+    old_loop_num = current.loop_num
     current.loop_num += 1
     current.loop_check = 0
+    # 主动停止：删掉落盘登记，避免下次重启误补播「监控已退出」。
+    monitor_registry.unregister(monitor_registry.KIND_CLAN, group_id, old_loop_num)
     group_name = await group_display_name(group_id)
     await publish_group_notification(
         group_id,
