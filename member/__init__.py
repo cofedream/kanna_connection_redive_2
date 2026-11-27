@@ -30,7 +30,7 @@ async def member_help(bot: HoshinoBot, ev: CQEvent):
 @sv.on_prefix("账号权限变更")
 async def change_account_access(bot: HoshinoBot, ev: CQEvent):
     user_id = ev.user_id
-    if not (account := await pcr_sqla.query_account(user_id)):
+    if not (await pcr_sqla.query_default_account(user_id)):
         await bot.send(ev, "你没有绑定账号")
         return
 
@@ -42,14 +42,12 @@ async def change_account_access(bot: HoshinoBot, ev: CQEvent):
 
     num = int(num)
 
-    account = account[0]
-
     if num not in AllowLevel._value2member_map_:
         await bot.send(ev, "无效权限等级")
         return
 
     await pcr_sqla.change_access(user_id, num)
-    await bot.send(ev, "修改成功")
+    await bot.send(ev, "修改成功（已应用到你的所有绑定账号）")
 
 
 @sv.on_fullmatch("绑定本群公会")

@@ -18,6 +18,7 @@ class Account(DataBase, table=True):
     platform: int = Field(title="服务器编号")
     viewer_id: Optional[int] = Field(default=None, title="游戏ID")
     allow_others: Optional[int] = Field(default=0, title="允许他人触发")
+    is_default: Optional[int] = Field(default=0, title="是否默认账号")
     account: Optional[str] = Field(default=None, title="uid")
     password: Optional[str] = Field(default=None, title="access_key")
     name: Optional[str] = Field(default=None, title="游戏昵称")

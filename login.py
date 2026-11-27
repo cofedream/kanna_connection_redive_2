@@ -19,12 +19,15 @@ from .basedata import Platform, FilePath
 from nonebot import NoticeSession, get_bot, on_command, on_notice, logger, on_startup
 from .database.dal import pcr_sqla
 from .util.account_commands import (
-    UNBIND_USAGE,
     format_account_list,
+    format_bind_success,
+    format_default_done,
     format_not_bound,
-    format_platform_unknown,
     format_unbind_done,
-    parse_platform,
+    is_default_account,
+    resolve_account_selector,
+    resolve_unbind_target,
+    split_default_flag,
 )
 from .util.tools import load_config, write_config
 from .errorclass import AccessKeyExpiredError, NeedRefreshError, UnknowError
@@ -35,8 +38,10 @@ sv_help = """
 【B绑定账号+uid+access_key】加号为空格，无需帐密，凭据过期后需重新提取并重新绑定
 【渠绑定账号+login_id+token】加号为空格
 【台绑定账号+short_udid+udid_viewer_id】加号为空格
-【查看绑定账号】查看自己当前绑定的账号
-【解绑账号+服务器】立即删除绑定，服务器填 B服/渠道服/台服
+同一个QQ可以绑定多个账号（同一服务器也可以绑多个），绑定指令末尾加「默认」可把它设为默认账号
+【查看绑定账号】查看自己绑定的所有账号，带 [默认] 的账号供指令默认使用
+【切换默认账号+序号】把列表里的某个账号设为默认账号，之后所有指令默认使用它
+【解绑账号+服务器或序号】立即删除绑定，如：解绑账号 B服 / 解绑账号 2
 login_id和token群里有提取器
 short_udid、udid和viewer_id也有提取器
 B服的uid和access_key也有提取器
@@ -53,6 +58,18 @@ def _rebind_hint(account: Account) -> str:
     if account.platform == Platform.qu_id.value:
         return "登录凭据已失效（token 过期或填写有误），请重新提取 login_id 和 token 后重新绑定"
     return "登录凭据已失效（access_key 过期或填写有误），请重新提取 uid 和 access_key 后重新绑定"
+
+
+async def _save_bound_account(qq_id: int, account: Account, **overrides) -> str:
+    """写入绑定结果并生成提示；overrides 用于覆盖不落库的字段。"""
+    saved = await pcr_sqla.add_account(
+        qq_id, {**account.dict(exclude_none=True), **overrides}
+    )
+    if saved is None:
+        saved = account
+    return format_bind_success(
+        saved, await pcr_sqla.query_default_account(qq_id)
+    )
 
 
 async def query(account: Account, is_force=False):
@@ -139,7 +156,9 @@ async def offline_remind(bot: HoshinoBot, ev: CQEvent):
 
 @on_command("绑定账号")
 async def bind_support(session: NoticeSession):
-    content = session.ctx.message.extract_plain_text().split()
+    content, want_default = split_default_flag(
+        session.ctx.message.extract_plain_text().split()
+    )
     qq_id = session.ctx.user_id
     if len(content) != 3:
         await session.send(sv_help)
@@ -156,14 +175,14 @@ async def bind_support(session: NoticeSession):
             account=uid,
             password=access_key,
             refresh=bili_account.account,
+            is_default=1 if want_default else 0,
         )
         client = await query(account, True)
         if load_index := await check_client(client):
             account.viewer_id = load_index.user_info.viewer_id
             account.name = load_index.user_info.user_name
-            await pcr_sqla.add_account(qq_id, account.dict(exclude_none=True))
             await pcr_sqla.add_refresh(bili_account)
-            await session.send("绑定成功")
+            await session.send(await _save_bound_account(qq_id, account))
         else:
             await session.send("绑定失败，请检查你的账号密码并重试")
     except Exception as e:
@@ -176,7 +195,9 @@ async def bind_support(session: NoticeSession):
     aliases=("b绑定账号", "B服绑定账号", "b服绑定账号"),
 )
 async def bind_support_b(session: NoticeSession):
-    content = session.ctx.message.extract_plain_text().split()
+    content, want_default = split_default_flag(
+        session.ctx.message.extract_plain_text().split()
+    )
     qq_id = session.ctx.user_id
     if len(content) != 3:
         await session.send(sv_help)
@@ -194,16 +215,16 @@ async def bind_support_b(session: NoticeSession):
             platform=Platform.b_id.value,
             account=uid,
             password=access_key,
+            is_default=1 if want_default else 0,
         )
         client = await query(account, True)
         if load_index := await check_client(client):
             account.viewer_id = load_index.user_info.viewer_id
             account.name = load_index.user_info.user_name
             # 非帐密绑定不保存B站帐密，清掉可能残留的 refresh，避免凭据失效后误用旧帐密续期
-            await pcr_sqla.add_account(
-                qq_id, {**account.dict(exclude_none=True), "refresh": None}
+            await session.send(
+                await _save_bound_account(qq_id, account, refresh=None)
             )
-            await session.send("绑定成功")
         else:
             await session.send("绑定失败，请检查你的 uid 和 access_key 是否完整并重试")
     except AccessKeyExpiredError as e:
@@ -215,7 +236,9 @@ async def bind_support_b(session: NoticeSession):
 
 @on_command("渠绑定账号")
 async def bind_support_qu(session: NoticeSession):
-    content = session.ctx.message.extract_plain_text().split()
+    content, want_default = split_default_flag(
+        session.ctx.message.extract_plain_text().split()
+    )
     qq_id = session.ctx.user_id
     if len(content) == 3:
         password = content[2]
@@ -230,13 +253,13 @@ async def bind_support_qu(session: NoticeSession):
             platform=Platform.qu_id.value,
             account=content[1],
             password=password,
+            is_default=1 if want_default else 0,
         )
         client = await query(account, True)
         if load_index := await check_client(client):
             account.viewer_id = load_index.user_info.viewer_id
             account.name = load_index.user_info.user_name
-            await pcr_sqla.add_account(qq_id, account.dict(exclude_none=True))
-            await session.send("绑定成功")
+            await session.send(await _save_bound_account(qq_id, account))
         else:
             await session.send("绑定失败，请检查你的获取的数据是否完整并重试")
     except Exception as e:
@@ -246,12 +269,16 @@ async def bind_support_qu(session: NoticeSession):
 
 @on_command("台绑定账号")
 async def bind_support_tw(session: NoticeSession):
-    content = session.ctx.message.extract_plain_text().split()
+    content, want_default = split_default_flag(
+        session.ctx.message.extract_plain_text().split()
+    )
     qq_id = session.ctx.user_id
-    if len(content) >= 4:
-        short_udid = content[1]
-        udid = content[2]
-        view_id = int(content[3])
+    if len(content) < 4:
+        await session.send(sv_help)
+        return
+    short_udid = content[1]
+    udid = content[2]
+    view_id = int(content[3])
     try:
         account = Account(
             user_id=qq_id,
@@ -259,12 +286,12 @@ async def bind_support_tw(session: NoticeSession):
             viewer_id=view_id,
             account=short_udid,
             password=udid,
+            is_default=1 if want_default else 0,
         )
         client = await query(account, True)
         if load_index := await check_client(client):
             account.name = load_index.user_info.user_name
-            await pcr_sqla.add_account(qq_id, account.dict(exclude_none=True))
-            await session.send("绑定成功")
+            await session.send(await _save_bound_account(qq_id, account))
         else:
             await session.send("绑定失败，请检查你的获取的数据是否完整并重试")
     except Exception as e:
@@ -283,18 +310,32 @@ def _forget_client_cache(account: Account):
 
 async def _unbind_account_text(user_id: int, args: str) -> str:
     tokens = args.split()
-    if not tokens:
-        return UNBIND_USAGE
-    platform = parse_platform(tokens[0])
-    if platform is None:
-        return format_platform_unknown(tokens[0])
     accounts = await pcr_sqla.query_account(user_id)
-    account = next((item for item in accounts if item.platform == platform), None)
-    if account is None:
-        return format_not_bound(platform)
-    await pcr_sqla.delete_account(user_id, platform)
+    account, error = resolve_unbind_target(tokens, accounts)
+    if error:
+        return error
+    was_default = is_default_account(account)
+    deleted = await pcr_sqla.delete_account(user_id, account.id)
+    if deleted is None:
+        return format_not_bound(account.platform)
     _forget_client_cache(account)
-    return format_unbind_done(account)
+    promoted = (
+        await pcr_sqla.query_default_account(user_id) if was_default else None
+    )
+    return format_unbind_done(account, promoted)
+
+
+async def _switch_default_text(user_id: int, args: str) -> str:
+    accounts = await pcr_sqla.query_account(user_id)
+    if not accounts:
+        return "你还没有绑定账号。发送【绑定账号帮助】查看绑定方式。"
+    account, error = resolve_account_selector(args, accounts)
+    if error:
+        return error
+    updated = await pcr_sqla.set_default_account(user_id, account.id)
+    if updated is None:
+        return "切换默认账号失败，请发送【查看绑定账号】确认后再试。"
+    return format_default_done(account)
 
 
 @sv.on_fullmatch("查看绑定账号", "查询绑定账号")
@@ -309,6 +350,13 @@ async def unbind_bound_account(bot: HoshinoBot, ev: CQEvent):
     )
 
 
+@sv.on_prefix("切换默认账号", "设定默认账号", "设为默认账号")
+async def switch_default_account(bot: HoshinoBot, ev: CQEvent):
+    await bot.send(
+        ev, await _switch_default_text(ev.user_id, ev.message.extract_plain_text())
+    )
+
+
 @on_command("查看绑定账号", aliases=("查询绑定账号",))
 async def view_bound_account_private(session: CommandSession):
     await session.send(await _account_list_text(session.ctx.user_id))
@@ -318,6 +366,15 @@ async def view_bound_account_private(session: CommandSession):
 async def unbind_bound_account_private(session: CommandSession):
     args = session.current_arg_text or ""
     await session.send(await _unbind_account_text(session.ctx.user_id, args))
+
+
+@on_command(
+    "切换默认账号",
+    aliases=("设定默认账号", "设为默认账号"),
+)
+async def switch_default_account_private(session: CommandSession):
+    args = session.current_arg_text or ""
+    await session.send(await _switch_default_text(session.ctx.user_id, args))
 
 
 @on_notice("offline_file")
@@ -355,10 +412,16 @@ async def qu_bind(session: NoticeSession):
             temp_dict["viewer_id"] = viewer_id
             temp_dict["platform"] = Platform.tw_id.value
 
-        await pcr_sqla.add_account(qq_id, temp_dict)
+        saved = await pcr_sqla.add_account(qq_id, temp_dict)
         await session.send("接受文件成功")
+        if saved is None:
+            saved = await pcr_sqla.query_default_account(qq_id)
+        if saved is None:
+            return
 
-        client = await query((await pcr_sqla.query_account(qq_id))[0])
+        client = await query(saved)
         if load_index := await check_client(client):
-            await pcr_sqla.add_account(qq_id, {"name": load_index.user_info.user_name})
+            await pcr_sqla.add_account(
+                qq_id, {"id": saved.id, "name": load_index.user_info.user_name}
+            )
             await session.send("绑定成功")

@@ -2,13 +2,14 @@ import time
 from datetime import datetime, timedelta, timezone
 from typing import List, Optional, Union
 
-from sqlalchemy import asc, delete, desc, insert, text, update
+from sqlalchemy import asc, delete, desc, text, update
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from sqlalchemy.future import select
 from sqlalchemy.orm import sessionmaker
 from sqlmodel import SQLModel, func
 
 from ..basedata import FilePath, NoticeType
+from ..util.account_commands import pick_default_account
 from .models import (
     Account,
     BattleEntryState,
@@ -96,89 +97,210 @@ class SQALA:
             for column, statement in migrations.items():
                 if column not in columns:
                     await conn.execute(text(statement))
+            await self._migrate_account_defaults(conn)
+
+    async def _migrate_account_defaults(self, conn):
+        """老库补上 is_default 列，并给每个 QQ 选一个默认账号。
+
+        多账号绑定上线前每个 (QQ, 服务器) 只有一条记录，这里把每组最早的账号
+        标成默认，保证老用户升级后不用重新设置。
+        """
+        account_columns = {
+            row[1]
+            for row in (
+                await conn.execute(text("PRAGMA table_info(account)"))
+            ).fetchall()
+        }
+        if "is_default" not in account_columns:
+            await conn.execute(
+                text(
+                    "ALTER TABLE account ADD COLUMN is_default "
+                    "INTEGER NOT NULL DEFAULT 0"
+                )
+            )
+        result = await conn.execute(
+            text("SELECT DISTINCT user_id FROM account")
+        )
+        for (user_id,) in result.fetchall():
+            has_default = await conn.execute(
+                text(
+                    "SELECT 1 FROM account "
+                    "WHERE user_id = :user_id AND is_default = 1 LIMIT 1"
+                ),
+                {"user_id": user_id},
+            )
+            if has_default.first() is not None:
+                continue
+            await conn.execute(
+                text(
+                    "UPDATE account SET is_default = 1 WHERE id = ("
+                    "SELECT MIN(id) FROM account WHERE user_id = :user_id)"
+                ),
+                {"user_id": user_id},
+            )
 
     # 账号部分
+    ACCOUNT_FIELDS = {
+        "platform",
+        "viewer_id",
+        "allow_others",
+        "is_default",
+        "account",
+        "password",
+        "name",
+        "refresh",
+    }
+
     async def query_account(self, user_id: int) -> List[Account]:
         async with self.async_session() as session:
             async with session.begin():
                 result = await session.execute(
-                    select(Account).where(Account.user_id == user_id)
+                    select(Account)
+                    .where(Account.user_id == user_id)
+                    .order_by(asc(Account.platform), asc(Account.id))
                 )
                 return result.scalars().all()
 
-    async def add_account(self, user_id: int, account: dict):
-        async with self.async_session() as session:
-            async with session.begin():
-                platform = account.get("platform")
-                if platform is None:
-                    update_values = {
-                        key: value
-                        for key, value in account.items()
-                        if key not in {"id", "user_id"}
-                    }
-                    if not update_values:
-                        return
-                    await session.execute(
-                        update(Account)
-                        .where(Account.user_id == user_id)
-                        .values(**update_values)
-                    )
-                    return
-                result = await session.execute(
-                    select(Account).where(
-                        Account.user_id == user_id,
-                        Account.platform == platform,
-                    )
-                )
-                if result.scalars().first():
-                    update_values = {
-                        key: value
-                        for key, value in account.items()
-                        if key not in {"id", "user_id", "platform"}
-                    }
-                    await session.execute(
-                        update(Account)
-                        .where(
-                            Account.user_id == user_id,
-                            Account.platform == platform,
-                        )
-                        .values(**update_values)
-                    )
-                else:
-                    insert_values = dict(account)
-                    insert_values.pop("id", None)
-                    insert_values["user_id"] = user_id
-                    await session.execute(insert(Account).values(**insert_values))
+    async def query_default_account(self, user_id: int) -> Optional[Account]:
+        """取当前默认账号；老数据没有标记时退回最早的账号。"""
+        return pick_default_account(await self.query_account(user_id))
 
-    async def delete_account(self, user_id: int, platform: int):
+    async def query_account_for_platform(
+        self, user_id: int, platform: int
+    ) -> Optional[Account]:
+        """按服务器取一个账号，优先该服务器里的默认账号（WebUI 旧接口用）。"""
+        accounts = [
+            item for item in await self.query_account(user_id) if item.platform == platform
+        ]
+        return pick_default_account(accounts)
+
+    async def add_account(self, user_id: int, account: dict) -> Optional[Account]:
+        """新增或更新账号，返回写入后的账号。
+
+        同一个 QQ 可以绑多个账号（包括同一服务器）。匹配顺序是：显式 id、
+        服务器 + 游戏ID、服务器 + 登录 uid。只有带 is_default=1 或该 QQ
+        还没有默认账号时才会改默认账号，避免普通改绑把默认账号顶掉。
+        """
+        values = {
+            key: value
+            for key, value in account.items()
+            if key in self.ACCOUNT_FIELDS
+        }
+        want_default = bool(values.pop("is_default", 0))
         async with self.async_session() as session:
             async with session.begin():
-                result = await session.execute(
-                    select(Account.refresh).where(
-                        Account.user_id == user_id,
-                        Account.platform == platform,
-                        Account.refresh.is_not(None),
-                    )
-                )
-                refresh_accounts = set(result.scalars().all())
-                await session.execute(
-                    delete(Account).where(
-                        Account.user_id == user_id,
-                        Account.platform == platform,
-                    )
-                )
-                for refresh_account in refresh_accounts:
-                    result = await session.execute(
-                        select(Account.id).where(
-                            Account.refresh == refresh_account
+                target = await self._account_target(session, user_id, account, values)
+                if target is None and values.get("platform") is None:
+                    # 旧调用只传了要更新的字段（例如只改昵称），退化为更新该 QQ 全部账号
+                    if values:
+                        await session.execute(
+                            update(Account)
+                            .where(Account.user_id == user_id)
+                            .values(**values)
                         )
+                    return None
+                if target is None:
+                    target = Account(user_id=user_id, **values)
+                    session.add(target)
+                else:
+                    for key, value in values.items():
+                        setattr(target, key, value)
+                await session.flush()
+                user_accounts = (
+                    await session.execute(
+                        select(Account)
+                        .where(Account.user_id == user_id)
+                        .order_by(asc(Account.platform), asc(Account.id))
                     )
-                    if result.scalars().first() is None:
+                ).scalars().all()
+                if want_default or not any(
+                    item.is_default for item in user_accounts
+                ):
+                    for item in user_accounts:
+                        item.is_default = 1 if item.id == target.id else 0
+                elif target.is_default is None:
+                    target.is_default = 0
+                await session.flush()
+                return target
+
+    async def _account_target(self, session, user_id: int, account: dict, values: dict):
+        raw_id = account.get("id")
+        if raw_id is not None:
+            candidate = await session.get(Account, raw_id)
+            if candidate is not None and candidate.user_id == user_id:
+                return candidate
+        platform = values.get("platform")
+        if platform is None:
+            return None
+        sql = select(Account).where(
+            Account.user_id == user_id, Account.platform == platform
+        )
+        if values.get("viewer_id") is not None:
+            sql = sql.where(Account.viewer_id == values["viewer_id"])
+        elif values.get("account") is not None:
+            sql = sql.where(Account.account == values["account"])
+        else:
+            sql = sql.where(Account.is_default == 1)
+        result = await session.execute(sql.order_by(asc(Account.id)))
+        return result.scalars().first()
+
+    async def delete_account(
+        self, user_id: int, account_id: int
+    ) -> Optional[Account]:
+        """按账号 id 删除，并在删掉默认账号时自动把下一个账号设为默认。"""
+        async with self.async_session() as session:
+            async with session.begin():
+                target = await session.get(Account, account_id)
+                if target is None or target.user_id != user_id:
+                    return None
+                refresh_account = target.refresh
+                was_default = bool(target.is_default)
+                await session.delete(target)
+                await session.flush()
+                remaining = (
+                    await session.execute(
+                        select(Account)
+                        .where(Account.user_id == user_id)
+                        .order_by(asc(Account.platform), asc(Account.id))
+                    )
+                ).scalars().all()
+                if remaining and (
+                    was_default or not any(item.is_default for item in remaining)
+                ):
+                    for index, item in enumerate(remaining):
+                        item.is_default = 1 if index == 0 else 0
+                if refresh_account:
+                    still_used = await session.execute(
+                        select(Account.id)
+                        .where(Account.refresh == refresh_account)
+                        .limit(1)
+                    )
+                    if still_used.first() is None:
                         await session.execute(
                             delete(RefreshAccount).where(
                                 RefreshAccount.account == refresh_account
                             )
                         )
+                await session.flush()
+                return target
+
+    async def set_default_account(
+        self, user_id: int, account_id: int
+    ) -> Optional[Account]:
+        async with self.async_session() as session:
+            async with session.begin():
+                target = await session.get(Account, account_id)
+                if target is None or target.user_id != user_id:
+                    return None
+                user_accounts = (
+                    await session.execute(
+                        select(Account).where(Account.user_id == user_id)
+                    )
+                ).scalars().all()
+                for item in user_accounts:
+                    item.is_default = 1 if item.id == target.id else 0
+                await session.flush()
+                return target
 
     async def change_access(
         self, user_id: int, level: int, platform: Optional[int] = None
@@ -492,30 +614,44 @@ class SQALA:
                 await session.execute(sql)
 
     # BOX部分
-    async def refresh_player_units(self, unit_list: List[PlayerUnit], user_id: int):
+    async def refresh_player_units(
+        self, unit_list: List[PlayerUnit], user_id: int, pcrid: Optional[int] = None
+    ):
+        """刷新某个账号的 BOX 缓存。
+
+        多账号后同一个 QQ 可能存着多个号的 BOX，用 pcrid 区分，只覆盖本次
+        刷新账号的数据；不传 pcrid 时保持旧行为，覆盖该 QQ 全部缓存。
+        """
         async with self.async_session() as session:
             async with session.begin():
-                await session.execute(
-                    delete(PlayerUnit).where(PlayerUnit.user_id == user_id)
-                )
+                sql = delete(PlayerUnit).where(PlayerUnit.user_id == user_id)
+                if pcrid is not None:
+                    sql = sql.where(PlayerUnit.pcrid == pcrid)
+                await session.execute(sql)
                 session.add_all(unit_list)
 
-    async def get_player_units(self, user_id: int) -> List[PlayerUnit]:
+    async def get_player_units(
+        self, user_id: int, pcrid: Optional[int] = None
+    ) -> List[PlayerUnit]:
         async with self.async_session() as session:
             async with session.begin():
-                result = await session.execute(
-                    select(PlayerUnit).where(PlayerUnit.user_id == user_id)
-                )
+                sql = select(PlayerUnit).where(PlayerUnit.user_id == user_id)
+                if pcrid is not None:
+                    sql = sql.where(PlayerUnit.pcrid == pcrid)
+                result = await session.execute(sql)
                 return result.scalars().all()
 
-    async def get_player_support_units(self, user_id: int) -> List[PlayerUnit]:
+    async def get_player_support_units(
+        self, user_id: int, pcrid: Optional[int] = None
+    ) -> List[PlayerUnit]:
         async with self.async_session() as session:
             async with session.begin():
-                result = await session.execute(
-                    select(PlayerUnit).where(
-                        PlayerUnit.user_id == user_id, PlayerUnit.support_position != 0
-                    )
+                sql = select(PlayerUnit).where(
+                    PlayerUnit.user_id == user_id, PlayerUnit.support_position != 0
                 )
+                if pcrid is not None:
+                    sql = sql.where(PlayerUnit.pcrid == pcrid)
+                result = await session.execute(sql)
                 return result.scalars().all()
 
     async def refresh_support_units(

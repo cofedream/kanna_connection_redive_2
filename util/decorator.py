@@ -12,11 +12,9 @@ def check_account_qqid(func):
     async def wrapper(bot: HoshinoBot, ev: CQEvent, *arg, **kwarg):
         qq_id, is_other = get_qid(ev)
 
-        if not (account := await pcr_sqla.query_account(qq_id)):
+        if not (account := await pcr_sqla.query_default_account(qq_id)):
             await bot.send(ev, "没有绑定账号，请发送【绑定账号帮助】（先加机器人好友）")
             return
-
-        account = account[0]
 
         if is_other and not other_allow(ev, account.allow_others):
             await bot.send(ev, "权限不足，请发送【成员管理帮助】")

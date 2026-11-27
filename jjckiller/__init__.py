@@ -60,7 +60,14 @@ async def jjc_monitor(bot: HoshinoBot, ev: CQEvent, account: Account, qq_id: int
     try:
         arena = arena_manager.generate_arena(qq_id, ev.group_id if is_group else None)
         client = await query(account)
-        await arena.init(client, ev.group_id, ev.self_id, account.platform)
+        await arena.init(
+            client,
+            ev.group_id,
+            ev.self_id,
+            account.platform,
+            account.name or "",
+            account.viewer_id or 0,
+        )
     except Exception as e:
         # print(traceback.format_exc())
         await bot.send(ev, str(e))
@@ -78,10 +85,13 @@ async def jjc_monitor(bot: HoshinoBot, ev: CQEvent, account: Account, qq_id: int
         pass
     arena.account_name = game_name or account.name or arena.account_name
     arena.monitor_name = remember_member_name(ev) if qq_id == ev.user_id else ""
-    await bot.send(
-        ev,
-        f"开始监控中, 可以发送【{'#' if is_group else ''}取消竞技场监控】或者顶号退出\n#监控编号HN100{loop_num}",
+    message = (
+        f"开始监控中, 可以发送【{'#' if is_group else ''}取消竞技场监控】或者顶号退出\n"
+        f"#监控编号HN100{loop_num}"
     )
+    if len(await pcr_sqla.query_account(qq_id)) > 1:
+        message += "\n当前使用默认账号，如需换号请先发送【切换默认账号 序号】"
+    await bot.send(ev, message)
     await arena_pool.add_task(PrioritizedQueryItem(data=ArenaItem(arena, loop_num)))
 
 

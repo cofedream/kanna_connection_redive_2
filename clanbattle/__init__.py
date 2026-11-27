@@ -35,7 +35,7 @@ from .model import ClanBattle, ClanbattleItem, ClanBattlePool, PrioritizedQueryI
 
 help_text = """
 * “+” 表示空格
-【出刀监控】机器人登录账号，监视出刀情况并记录
+【出刀监控】机器人登录账号，监视出刀情况并记录（使用【查看绑定账号】里的默认账号）
 【催刀】栞栞谁没出满三刀
 【当前战报】本期会战出刀情况
 【我的战报 + 游戏名称】 栞栞个人出刀情况
@@ -125,10 +125,12 @@ async def clanbattle_monitor(
     # 监控人以游戏昵称为主（登录时已刷新），QQ 昵称只作括注，官方机器人拿不到群名片
     clan_info.monitor_name = remember_member_name(ev) if qq_id == ev.user_id else ""
     clan_info.account_name = clan_info.account_name or account.name or ""
-    await bot.send(
-        ev,
-        f"开始监控中, 可以发送【取消出刀监控】或者顶号退出\n#监控编号HN000{loop_num}",
+    message = (
+        f"开始监控中, 可以发送【取消出刀监控】或者顶号退出\n#监控编号HN000{loop_num}"
     )
+    if len(await pcr_sqla.query_account(qq_id)) > 1:
+        message += "\n当前使用默认账号，如需换号请先发送【切换默认账号 序号】"
+    await bot.send(ev, message)
     await clanbattle_pool.add_task(
         PrioritizedQueryItem(data=ClanbattleItem(clan_info, loop_num))
     )

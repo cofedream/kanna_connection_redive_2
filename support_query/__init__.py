@@ -16,6 +16,7 @@ from .util import (
 )
 from ..util.tools import get_qid, name2id, load_config
 from ..util.decorator import check_account_qqid
+from ..util.account_commands import group_default_accounts
 from ..database.dal import pcr_sqla
 from ..basedata import TALENT, FilePath
 from ..util.text2img import image_draw
@@ -44,6 +45,12 @@ sv = Service(
     enable_on_default=True,  # 默认启用
     help_=help_text,  # 帮助说明
 )
+
+
+async def _own_pcrid(qq_id: int):
+    """当前默认账号的游戏ID，用于把 BOX 缓存限定在这个账号上。"""
+    account = await pcr_sqla.query_default_account(qq_id)
+    return account.viewer_id if account else None
 
 
 @sv.on_fullmatch("查box帮助")
@@ -117,7 +124,7 @@ async def query_box(bot: HoshinoBot, ev: CQEvent):
     if msg:
         await bot.send(ev, msg)
         return
-    supports = await pcr_sqla.get_player_units(qq_id)
+    supports = await pcr_sqla.get_player_units(qq_id, pcrid=await _own_pcrid(qq_id))
     units = search_target(ids, supports)
     if not units:
         await bot.send(ev, "没有找到该角色")
@@ -131,7 +138,9 @@ async def query_support_box(bot: HoshinoBot, ev: CQEvent):
     if ev.message.extract_plain_text().strip():
         return
     qq_id, _ = get_qid(ev)
-    supports = await pcr_sqla.get_player_support_units(qq_id)
+    supports = await pcr_sqla.get_player_support_units(
+        qq_id, pcrid=await _own_pcrid(qq_id)
+    )
     images = await generate_self_support_img(supports)
     await bot.send(ev, MessageSegment.image(pic2b64(images)))
 
@@ -186,8 +195,13 @@ async def query_clanbattle_box(bot: HoshinoBot, ev: CQEvent):
         await bot.send(ev, msg)
         return
     members = await pcr_sqla.get_group_member(ev.group_id)
+    default_accounts = group_default_accounts(
+        await pcr_sqla.query_accounts_by_users([member.user_id for member in members])
+    )
     for member in members:
-        units = await pcr_sqla.get_player_units(member.user_id)
+        account = default_accounts.get(member.user_id)
+        pcrid = account.viewer_id if account else None
+        units = await pcr_sqla.get_player_units(member.user_id, pcrid=pcrid)
         clan_info += search_target(ids, units)
     if len(clan_info) == 0:
         await bot.send(ev, "没有找到该角色")
@@ -200,7 +214,9 @@ async def query_clanbattle_box(bot: HoshinoBot, ev: CQEvent):
 @sv.on_fullmatch("导出原始box")
 async def export_box(bot: HoshinoBot, ev: CQEvent):
     qq_id, _ = get_qid(ev)
-    supports = await pcr_sqla.get_player_units(qq_id)
+    supports = await pcr_sqla.get_player_units(
+        qq_id, pcrid=await _own_pcrid(qq_id)
+    )
 
     _path = str(FilePath.data.value / "temp" / f"box_{qq_id}.json")
     with open(_path, "w") as f:

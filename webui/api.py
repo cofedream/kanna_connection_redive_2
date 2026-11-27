@@ -19,6 +19,11 @@ from hoshino.modules.priconne._pcr_data import CHARA_NAME
 
 from ..util.tools import daoflag2str, anywhere_send
 from ..util import monitor_registry
+from ..util.account_commands import (
+    group_default_accounts,
+    pick_preferred_account,
+    pick_preferred_accounts,
+)
 
 from ..clanbattle import (
     clanbattle_info,
@@ -436,14 +441,8 @@ def account_info(account: Account) -> PcrAccountInfo:
 
 
 async def owned_game_account(user_id: int, platform: int) -> Account:
-    account = next(
-        (
-            item
-            for item in await pcr_sqla.query_account(user_id)
-            if item.platform == platform
-        ),
-        None,
-    )
+    """WebUI 仍按服务器单账号操作；同一服务器有多个号时优先默认账号。"""
+    account = await pcr_sqla.query_account_for_platform(user_id, platform)
     if not account:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "没有找到指定PCR账号")
     return account
@@ -760,7 +759,8 @@ async def qq_avatar(qq_id: int, token: CookieCache = Depends(verify_cookie)):
 async def user_info(token: CookieCache = Depends(verify_cookie)):
     user_id = int(token.user_id)
     web_user = await pcr_sqla.web_query_user(user_id)
-    accounts = await pcr_sqla.query_account(user_id)
+    # WebUI 保持「一个服务器一个账号」的旧契约，多账号时展示该服务器的默认账号
+    accounts = pick_preferred_accounts(await pcr_sqla.query_account(user_id))
     groups = await pcr_sqla.get_member_group(user_id)
     if is_hoshino_superuser(user_id):
         local_groups = {
@@ -817,17 +817,14 @@ async def bind_pcr_account(
             status.HTTP_400_BAD_REQUEST,
             "绑定失败，请检查账号凭据、验证码或网络状态",
         )
-    existing_account = next(
-        (
-            item
-            for item in await pcr_sqla.query_account(user_id)
-            if item.platform == account.platform
-        ),
-        None,
+    existing_account = await pcr_sqla.query_account_for_platform(
+        user_id, account.platform
     )
     if existing_account:
         account.allow_others = existing_account.allow_others or 0
-    await pcr_sqla.add_account(user_id, account.dict(exclude_none=True))
+    # 网页端按服务器单账号操作，新绑定的号直接作为默认账号，页面才能继续用它
+    account.is_default = 1
+    saved = await pcr_sqla.add_account(user_id, account.dict(exclude_none=True))
     if refresh_account:
         await pcr_sqla.add_refresh(refresh_account)
     await publish_user_notification(
@@ -837,7 +834,7 @@ async def bind_pcr_account(
         f"已绑定 {account.name or account.viewer_id}（服务器 {account.platform}）",
         "/usercenter?tab=pcr",
     )
-    return account_info(account).dict()
+    return account_info(saved or account).dict()
 
 
 @api_app.delete("/pcr-account/{platform}")
@@ -845,18 +842,32 @@ async def unbind_pcr_account(
     platform: int, token: CookieCache = Depends(verify_cookie)
 ):
     user_id = int(token.user_id)
-    accounts = await pcr_sqla.query_account(user_id)
-    if not any(account.platform == platform for account in accounts):
+    account = await pcr_sqla.query_account_for_platform(user_id, platform)
+    if not account:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "没有找到这个PCR账号")
-    await pcr_sqla.delete_account(user_id, platform)
+    if await pcr_sqla.delete_account(user_id, account.id) is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "没有找到这个PCR账号")
+    remaining = [
+        item
+        for item in await pcr_sqla.query_account(user_id)
+        if item.platform == platform
+    ]
+    description = f"服务器 {platform} 的账号已解除绑定"
+    message = "解绑成功"
+    if remaining:
+        description += f"（该服务器还有 {len(remaining)} 个账号）"
+        message = (
+            f"解绑成功；该服务器还有 {len(remaining)} 个账号，"
+            "请在机器人发送【查看绑定账号】管理"
+        )
     await publish_user_notification(
         user_id,
         "account",
         "PCR账号已解绑",
-        f"服务器 {platform} 的账号已解除绑定",
+        description,
         "/usercenter?tab=pcr",
     )
-    return {"message": "解绑成功"}
+    return {"message": message}
 
 
 @api_app.patch("/pcr-account/{platform}/access")
@@ -913,6 +924,16 @@ async def player_box(
         if support_only
         else await pcr_sqla.get_player_units(user_id)
     )
+    # 多账号后缓存里可能同时存着好几个号的 BOX，网页端只展示每个服务器的默认账号
+    preferred_pcrids = {
+        account.viewer_id
+        for account in pick_preferred_accounts(
+            await pcr_sqla.query_account(user_id)
+        )
+        if account.viewer_id
+    }
+    if preferred_pcrids:
+        units = [unit for unit in units if unit.pcrid in preferred_pcrids]
     keyword = search.strip().lower()
     web_units = [web_game_unit(unit) for unit in units]
     if keyword:
@@ -970,12 +991,14 @@ async def set_player_support(
     user_id = int(token.user_id)
     if form.mode not in (1, 2, 3):
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "无效助战类型")
+    account = await owned_game_account(user_id, form.platform)
     if not any(
         unit.unit_id == form.unit_id
-        for unit in await pcr_sqla.get_player_units(user_id)
+        for unit in await pcr_sqla.get_player_units(
+            user_id, pcrid=account.viewer_id
+        )
     ):
         raise HTTPException(status.HTTP_404_NOT_FOUND, "请先刷新BOX后再选择角色")
-    account = await owned_game_account(user_id, form.platform)
     async with game_action_locks[user_id]:
         result = await change_support_unit(
             account, form.unit_id, form.mode, include_image=False
@@ -1103,7 +1126,7 @@ async def arena_sources(token: CookieCache = Depends(verify_cookie)):
     user_id = int(token.user_id)
     own_accounts = await pcr_sqla.query_account(user_id)
     sources = {}
-    for account in own_accounts:
+    for account in pick_preferred_accounts(own_accounts):
         sources[(user_id, account.platform)] = ArenaSourceInfo(
             source_user_id=user_id,
             platform=account.platform,
@@ -1113,8 +1136,8 @@ async def arena_sources(token: CookieCache = Depends(verify_cookie)):
         )
     for arena in arena_manager.active_arenas():
         accounts = await pcr_sqla.query_account(arena.user_id)
-        account = next(
-            (item for item in accounts if item.platform == arena.platform), None
+        account = pick_preferred_account(
+            accounts, arena.platform, viewer_id=arena.viewer_id or None
         )
         key = (arena.user_id, arena.platform)
         sources[key] = ArenaSourceInfo(
@@ -1213,13 +1236,10 @@ async def arena_overview(
 ):
     viewer_user_id = int(token.user_id)
     arena = active_arena_for(source_user_id, platform)
-    account = next(
-        (
-            item
-            for item in await pcr_sqla.query_account(source_user_id)
-            if item.platform == platform
-        ),
-        None,
+    account = pick_preferred_account(
+        await pcr_sqla.query_account(source_user_id),
+        platform,
+        viewer_id=arena.viewer_id or None,
     )
     if not account:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "监控账号已不存在")
@@ -1700,9 +1720,7 @@ async def clan_management(
         ]
     user_ids = [int(member["user_id"]) for member in source_members]
     accounts = await pcr_sqla.query_accounts_by_users(user_ids)
-    accounts_by_user = defaultdict(list)
-    for account in accounts:
-        accounts_by_user[account.user_id].append(account)
+    accounts_by_user = group_default_accounts(accounts)
     record_summary = defaultdict(lambda: {"dao": 0.0, "last": 0})
     for record in await pcr_sqla.get_all_records(group_id):
         record_summary[record.pcrid]["dao"] += dao_weight(record.flag)
@@ -1723,7 +1741,7 @@ async def clan_management(
                 qq_level,
                 ROLE_FOREMAN if delegated else ROLE_EMPLOYEE,
             )
-        account = accounts_by_user.get(member_id, [None])[0]
+        account = accounts_by_user.get(member_id)
         record = record_summary.get(account.viewer_id if account else 0, {"dao": 0, "last": 0})
         member_rows.append(
             ClanMemberInfo(
@@ -1842,7 +1860,8 @@ async def clan_operations(
         [member.user_id for member in local_members]
     )
     usable_accounts = []
-    for account in accounts:
+    # WebUI 仍以「谁 + 服务器」定位账号，多账号时取该服务器的默认账号
+    for account in pick_preferred_accounts(accounts):
         if account.user_id == user_id or level >= ROLE_CHAIRMAN or (account.allow_others or 0) >= 1:
             usable_accounts.append(
                 OperationAccountInfo(
@@ -1898,13 +1917,8 @@ async def start_clan_monitor(
     operator_id = int(token.user_id)
     level, _, _ = await require_group_role(group_id, token, ROLE_FOREMAN)
     account_owner = form.account_user_id or operator_id
-    account = next(
-        (
-            item
-            for item in await pcr_sqla.query_account(account_owner)
-            if item.platform == form.platform
-        ),
-        None,
+    account = await pcr_sqla.query_account_for_platform(
+        account_owner, form.platform
     )
     if not account:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "没有找到指定PCR账号")
@@ -2055,8 +2069,7 @@ async def home_info(token: CookieCache = Depends(verify_cookie)):
     elif response.priority > 20:
         response.status = "站点管理员"
 
-    if pcr_user := (await pcr_sqla.query_account(user_id)):
-        pcr_user = pcr_user[0]
+    if pcr_user := await pcr_sqla.query_default_account(user_id):
         response.name = pcr_user.name
     if groups := await pcr_sqla.get_member_group(user_id):
         response.clan = [group.dict() for group in groups]
@@ -2185,8 +2198,7 @@ async def clan_report(
             )
             for player in info[::-1]
         ]
-    if pcr_user := (await pcr_sqla.query_account(user_id)):
-        pcr_user = pcr_user[0]
+    if pcr_user := await pcr_sqla.query_default_account(user_id):
         response.name = pcr_user.name
         if info := await pcr_sqla.get_player_records(pcr_user.viewer_id, 5, group_id):
             knife = 0

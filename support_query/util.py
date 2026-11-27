@@ -290,7 +290,7 @@ async def save_player_units(
             unit_info["support_position"] = clan_supposrt_ids[unit_data.id] + 2
 
         temp_units.append(PlayerUnit(**unit_info))
-    await pcr_sqla.refresh_player_units(temp_units, qid)
+    await pcr_sqla.refresh_player_units(temp_units, qid, viewer_id)
 
 
 def generate_unit2library(target_rank: float, target_units: List[UnitData]) -> list:
