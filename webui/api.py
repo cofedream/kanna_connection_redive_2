@@ -2418,6 +2418,10 @@ app = api_app
 
 @on_startup
 async def kanna_web():
+    # 正常入口在 webui/__init__.py 已按 WebSetting.enable 拦截过导入；这里再判断一次，
+    # 防止有人绕过包入口直接导入本模块时仍然拉起 uvicorn。
+    if not WebSetting.enable.value:
+        return
     web = threading.Thread(
         target=uvicorn.run,
         kwargs={

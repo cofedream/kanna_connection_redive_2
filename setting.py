@@ -43,8 +43,15 @@ class JJCSetting(Enum):
 class WebSetting(Enum):
     """
     网页端！！！
+    enable：是否启用网页端 API。不部署前端时保持 False，机器人不会导入 FastAPI/uvicorn，
+            也不会启动后台线程和监听端口，可省掉这部分内存与启动开销；部署前端时改为 True。
+    api_host：网页端 API 监听地址
+    api_port：网页端 API 监听端口
+    cookie_secure：是否只允许 HTTPS 下携带登录 Cookie
+    web_public_url：网页端对外访问地址
     """
 
+    enable = False
     api_host = "127.0.0.1"
     api_port = "12139"
     cookie_secure = False

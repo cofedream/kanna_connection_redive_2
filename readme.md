@@ -152,7 +152,7 @@ BOSS：1-5，对应公会战的一至五王，可以‘123’或者‘12’,也�
 
 ## 🌐 网页端 WebUI
 
-网页端前端代码位于 [kanna_connection_webui](https://github.com/SonderXiaoming/kanna_connection_webui)。启用本插件后，后端会在 `WebSetting.api_host` 和 `WebSetting.api_port` 指定的地址启动 FastAPI；默认地址是 `127.0.0.1:12139`。前端页面、静态文件和对外访问入口需要另行部署。
+网页端前端代码位于 [kanna_connection_webui](https://github.com/SonderXiaoming/kanna_connection_webui)。网页端是可选功能：只有把 `setting.py` 中 `WebSetting.enable` 设为 `True` 并重启机器人后，后端才会在 `WebSetting.api_host` 和 `WebSetting.api_port` 指定的地址启动 FastAPI；默认关闭（`False`），此时不会导入 FastAPI/uvicorn，不会启动后台线程，也不会监听 `12139` 端口。前端页面、静态文件和对外访问入口需要另行部署。
 
 网页端包含会战面板、通知与出刀记录、公会管理、BOX 与助战、竞技场中心，以及个人账号和通知设置。页面显示和可执行的操作会根据所在公会及账号权限变化。
 
@@ -174,7 +174,7 @@ BOSS：1-5，对应公会战的一至五王，可以‘123’或者‘12’,也�
 
 ### 部署前端
 
-1. 确认机器人已加载本插件，并在服务器本机访问 `http://127.0.0.1:12139/docs` 检查 API 是否启动。若修改了 `WebSetting.api_host` 或 `WebSetting.api_port`，使用修改后的地址。
+1. 在 `setting.py` 中把 `WebSetting.enable` 设为 `True` 并重启机器人，然后在服务器本机访问 `http://127.0.0.1:12139/docs` 检查 API 是否启动。若修改了 `WebSetting.api_host` 或 `WebSetting.api_port`，使用修改后的地址。
 2. 安装 Node.js 20 和 npm，构建网页静态文件：
 
    ```sh
@@ -191,6 +191,7 @@ BOSS：1-5，对应公会战的一至五王，可以‘123’或者‘12’,也�
 
    ```python
    class WebSetting(Enum):
+       enable = True
        api_host = "127.0.0.1"
        api_port = "12139"
        cookie_secure = True
@@ -198,6 +199,8 @@ BOSS：1-5，对应公会战的一至五王，可以‘123’或者‘12’,也�
    ```
 
    `web_public_url` 必须与实际网页地址一致，机器人生成的登录链接会使用它。上例启用了 HTTPS，因此 `cookie_secure` 为 `True`；若仅在 HTTP 环境测试，则设为 `False`。修改配置后重启机器人。不要将内部 API 端口 `12139` 直接暴露到公网。
+
+5. 不部署网页端时把 `WebSetting.enable` 保持为 `False`：机器人不会启动 FastAPI，也不会注册 `网页端登录`、`设置网页密码` 指令。相比开启时，这能省掉一个常驻 uvicorn 线程、约 8MB 内存和约 0.2 秒的导入时间，空闲时 CPU 开销基本为零；如果浏览器一直开着网页，还会因页面轮询额外占用少量 CPU 并周期性查询数据库。修改开关后都需要重启机器人才能生效。
 
 ### 登录与使用
 
