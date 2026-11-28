@@ -166,101 +166,85 @@ def calculate_hedao(damage1: float, damage2: float, rest_hp: float) -> HedaoResu
     )
 
 
+def parse_hedao_args(args) -> HedaoResult:
+    """按指令顺序解析三个参数：BOSS 血量、刀 1 伤害、刀 2 伤害。"""
+    if len(args) != 3:
+        raise HedaoError("请输入：合刀 BOSS血量 刀1伤害 刀2伤害")
+    rest_hp, damage1, damage2 = (parse_amount(arg) for arg in args)
+    return calculate_hedao(damage1, damage2, rest_hp)
+
+
 def _trim(value: float, digits: int = 2) -> str:
     text = f"{value:.{digits}f}".rstrip("0").rstrip(".")
     return text or "0"
 
 
 def format_amount(value: float) -> str:
-    """大于等于一万时用“万”显示，避免一长串 0。"""
-    if value >= 10000:
-        return f"{_trim(value / 10000)}万"
+    """整数万简写为 4w，其余按数值显示，避免长串 0。"""
+    if value >= 10000 and value % 10000 == 0:
+        return f"{int(value / 10000)}w"
     return _trim(value)
 
 
 def format_seconds(value: float) -> str:
-    return f"{_trim(value)}秒"
+    return f"{_trim(value)}s"
+
+
+def _order_text(order: HedaoOrder) -> str:
+    first = format_amount(order.first_damage)
+    second = format_amount(order.second_damage)
+    if order.first_solo:
+        return f"若[{first}]先出，直接击破，无需[{second}]出场"
+    return (
+        f"若[{first}]先出，[{second}]后出，"
+        f"补偿{format_seconds(order.carry_seconds)}"
+    )
 
 
 def _recommend(result: HedaoResult) -> str:
-    orders = (result.order_1, result.order_2)
-    valid = [order for order in orders if order.carry_seconds is not None]
+    valid = [
+        order
+        for order in (result.order_1, result.order_2)
+        if order.carry_seconds is not None
+    ]
     if not valid:
-        return "两刀任意一刀都能单独击破 BOSS，不需要合刀"
-
+        return "推荐：任意一刀都能直接击破，不需要合刀"
     if len(valid) == 1:
         order = valid[0]
         return (
-            f"推荐：刀{order.first}先出，刀{order.second}可获得 "
-            f"{format_seconds(order.carry_seconds)}补偿刀"
-            f"（若刀{order.second}先出会直接击破，刀{order.first}吃不到补偿）"
+            f"推荐：[{format_amount(order.first_damage)}]先出，"
+            f"[{format_amount(order.second_damage)}]可获"
+            f"{format_seconds(order.carry_seconds)}补偿"
         )
 
     first, second = valid
     if abs(first.carry_seconds - second.carry_seconds) <= EPSILON:
         return (
-            "两种出刀顺序收益相同，后出刀都能获得 "
-            f"{format_seconds(first.carry_seconds)}补偿刀"
+            "推荐：两种顺序均可，后出刀补偿"
+            f"{format_seconds(first.carry_seconds)}"
         )
-    better, worse = (
-        (first, second)
-        if first.carry_seconds > second.carry_seconds
-        else (second, first)
-    )
-    gap = better.carry_seconds - worse.carry_seconds
+    better = first if first.carry_seconds > second.carry_seconds else second
     return (
-        f"推荐：刀{better.first}先出，刀{better.second}可获得 "
-        f"{format_seconds(better.carry_seconds)}补偿刀"
-        f"（比另一顺序多 {format_seconds(gap)}）"
+        f"推荐：[{format_amount(better.first_damage)}]先出，"
+        f"[{format_amount(better.second_damage)}]可获"
+        f"{format_seconds(better.carry_seconds)}补偿"
     )
 
 
 def format_hedao_reply(result: HedaoResult) -> str:
-    head = (
-        f"合刀计算：刀1 {format_amount(result.damage1)} + "
-        f"刀2 {format_amount(result.damage2)}，"
-        f"BOSS 剩余 {format_amount(result.rest_hp)}"
-    )
-    total = result.damage1 + result.damage2
+    lines = [
+        f"boss血量={format_amount(result.rest_hp)}",
+        f"对boss伤害={format_amount(result.damage1)} | "
+        f"{format_amount(result.damage2)}",
+    ]
     if not result.killable:
-        return (
-            f"{head}\n两刀合计 {format_amount(total)}，"
-            f"还差 {format_amount(result.shortfall)} 伤害，打不死 BOSS"
+        lines.append(
+            f"两刀合计{format_amount(result.damage1 + result.damage2)}，"
+            f"还差{format_amount(result.shortfall)}，打不死"
         )
+        return "\n".join(lines)
 
-    lines = [head, f"两刀合计 {format_amount(total)}，可击破 BOSS", ""]
-    for order in (result.order_1, result.order_2):
-        lines.append(f"刀{order.first}先出，刀{order.second}后出：")
-        if order.first_solo:
-            lines.append(
-                f"  刀{order.first}直接单独击破，伤害按剩余血量 "
-                f"{format_amount(result.rest_hp)} 计"
-                f"（溢出 {format_amount(order.first_overflow)}），"
-                f"无需刀{order.second}出场"
-            )
-        else:
-            lines.append(
-                f"  刀{order.first}原始伤害 {format_amount(order.first_damage)}，"
-                f"BOSS 还剩 {format_amount(order.hp_after_first)}"
-            )
-            if order.carry_seconds is None:
-                lines.append(
-                    f"  刀{order.second}原始伤害 "
-                    f"{format_amount(order.second_damage)}，"
-                    f"打完后 BOSS 还剩 "
-                    f"{format_amount(order.remaining_after_second)}"
-                )
-            else:
-                detail = f"计入 {format_amount(order.second_dealt)}"
-                if order.second_overflow > 0:
-                    detail += f"（溢出 {format_amount(order.second_overflow)}）"
-                cap = "，已达上限" if order.carry_capped else ""
-                lines.append(
-                    f"  刀{order.second}原始伤害 "
-                    f"{format_amount(order.second_damage)}，{detail}，"
-                    f"补偿刀时长 {format_seconds(order.carry_seconds)}{cap}"
-                )
-        lines.append("")
-
+    lines.append(_order_text(result.order_1))
+    lines.append(_order_text(result.order_2))
     lines.append(_recommend(result))
     return "\n".join(lines)

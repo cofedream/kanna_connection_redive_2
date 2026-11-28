@@ -94,35 +94,66 @@ class CalculateTests(unittest.TestCase):
                     hedao.calculate_hedao(*args)
 
 
+class ParseHedaoArgsTests(unittest.TestCase):
+    def test_argument_order_is_boss_first(self):
+        result = hedao.parse_hedao_args(["46700", "36900", "40000"])
+        self.assertEqual(result.rest_hp, 46700)
+        self.assertEqual(result.damage1, 36900)
+        self.assertEqual(result.damage2, 40000)
+
+    def test_wrong_argument_count(self):
+        with self.assertRaises(hedao.HedaoError):
+            hedao.parse_hedao_args(["46700", "36900"])
+
+
 class FormatTests(unittest.TestCase):
-    def test_amount_uses_wan(self):
+    def test_amount_format(self):
         self.assertEqual(hedao.format_amount(50), "50")
-        self.assertEqual(hedao.format_amount(5000000), "500万")
+        self.assertEqual(hedao.format_amount(46700), "46700")
+        self.assertEqual(hedao.format_amount(40000), "4w")
+        self.assertEqual(hedao.format_amount(5000000), "500w")
         self.assertEqual(hedao.format_amount(0), "0")
 
-    def test_reply_recommends_the_better_order(self):
-        reply = hedao.format_hedao_reply(hedao.calculate_hedao(50, 60, 70))
-        self.assertIn("刀2先出，刀1后出", reply)
-        self.assertIn("补偿刀时长 90秒，已达上限", reply)
-        self.assertIn("推荐：刀2先出，刀1可获得 90秒补偿刀", reply)
+    def test_reply_matches_example(self):
+        reply = hedao.format_hedao_reply(
+            hedao.calculate_hedao(36900, 40000, 46700)
+        )
+        self.assertEqual(
+            reply,
+            "boss血量=46700\n"
+            "对boss伤害=36900 | 4w\n"
+            "若[36900]先出，[4w]后出，补偿88s\n"
+            "若[4w]先出，[36900]后出，补偿90s\n"
+            "推荐：[4w]先出，[36900]可获90s补偿",
+        )
 
     def test_reply_reports_shortfall(self):
         reply = hedao.format_hedao_reply(hedao.calculate_hedao(50, 60, 120))
-        self.assertIn("还差 10 伤害", reply)
-        self.assertIn("打不死 BOSS", reply)
+        self.assertEqual(
+            reply,
+            "boss血量=120\n"
+            "对boss伤害=50 | 60\n"
+            "两刀合计110，还差10，打不死",
+        )
 
     def test_reply_handles_solo_kill(self):
         reply = hedao.format_hedao_reply(hedao.calculate_hedao(200, 50, 100))
-        self.assertIn("刀1直接单独击破", reply)
-        self.assertIn("推荐：刀2先出，刀1可获得 88秒补偿刀", reply)
+        self.assertEqual(
+            reply,
+            "boss血量=100\n"
+            "对boss伤害=200 | 50\n"
+            "若[200]先出，直接击破，无需[50]出场\n"
+            "若[50]先出，[200]后出，补偿88s\n"
+            "推荐：[50]先出，[200]可获88s补偿",
+        )
 
     def test_reply_handles_both_solo_kills(self):
         reply = hedao.format_hedao_reply(hedao.calculate_hedao(200, 300, 100))
-        self.assertIn("不需要合刀", reply)
+        self.assertIn("推荐：任意一刀都能直接击破，不需要合刀", reply)
 
     def test_reply_reports_tie(self):
         reply = hedao.format_hedao_reply(hedao.calculate_hedao(50, 70, 120))
-        self.assertIn("两种出刀顺序收益相同", reply)
+        self.assertIn("推荐：两种顺序均可，后出刀补偿20s", reply)
 
 
 if __name__ == "__main__":
